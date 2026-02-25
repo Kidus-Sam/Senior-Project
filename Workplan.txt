@@ -1,0 +1,162 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Kidus Samson
+Senior Project Proposal
+AudioTexture 
+Section: Allana Johnson
+February 16, 2026
+
+
+
+
+
+
+
+
+
+
+
+Table of Contents
+Project Summary	2
+Significance	3
+Required Tools & Availability	4
+Demonstration Plans	5
+Qualifications	5
+Project Specifications	6
+Functional Specifications	6
+User Interface Specification	7
+Technical Details	7
+Developer Work Plan	8
+Timeline	10
+Checkpoint #1 (insert checkpoint date)	11
+Checkpoint #2 (insert checkpoint date)	11
+Checkpoint #3 (insert checkpoint date)	11
+Checkpoint #4 (insert checkpoint date):	12
+Future Enhancements	12
+Ethical Considerations	13
+Bibliography	14
+
+
+
+
+
+
+Project Summary
+AudioTexture is a specialized desktop application designed to classify musical audio through the analysis of acoustic texture using deep learning. While traditional music categorization often suffers from the inconsistencies and subjectivity of manual tagging, this system leverages a Convolutional Neural Network (CNN) trained on the FMA small dataset—which consists of 8,000 balanced tracks across eight distinct genres—to identify musical styles through objective spectral analysis. By automating metadata generation, the application ensures that independent musicians can precisely tag their work, overcoming the categorization hurdles often encountered during digital distribution on major streaming platforms.
+
+The application features a responsive graphical user interface (GUI) developed with Tkinter that supports seamless drag-and-drop functionality for raw audio files. Upon upload, the system processes the signals into high-resolution Mel-spectrograms, which act as visual "fingerprints" representing frequency intensity over time. These images are analyzed by the CNN to determine the most probable genre, such as Soul, Hip-Hop, or Electronic, and provide a corresponding confidence percentage to indicate prediction reliability. This content-based methodology allows for a purely objective classification based on auditory data, effectively eliminating the biases and errors associated with subjective human labeling.
+Significance	
+AudioTexture addresses the "Black Box" crisis in the global music industry, where approximately $15 billion in royalties go undistributed annually due to incorrect or missing metadata. Independent artists are often "erased" by streaming algorithms when their work is mislabeled. For instance, artists like Kaytranada are frequently tagged under "Electronic" instead of the R&B charts where they reside, while global artists like Tems are often generalized as "World Music," limiting their commercial reach.
+
+From a Computer Science perspective, this project involves complex signal processing, high-dimensional data management, and the implementation of deep learning architectures. The complexity lies in converting non-visual audio data into a format suitable for computer vision and optimizing a CNN to distinguish between nuanced musical textures. This bridges the gap between digital signal processing (DSP) and Machine Learning, requiring a rigorous understanding of both feature extraction and neural network optimization.
+Required Tools & Availability
+This project requires a high-performance computer for model training and specific software libraries for audio processing.
+•	Hardware: I will use a personal Windows-based PC for the primary development of the application and GUI. To handle the high computational requirements of deep learning, I will utilize Google Colab’s GPU-accelerated cloud environment for model training and hyperparameter optimization. Once the optimal CNN model is identified, it will be exported and saved as a Keras model file to be run locally on my Windows machine for inference and demonstration.
+•	Languages: Python 3.10 will be used as the primary language.
+•	Libraries: 
+o	TensorFlow/Keras or PyTorch for building and training the CNN.
+o	Librosa for performing Fast Fourier Transforms (FFT) and Mel-spectrogram generation.
+o	Tkinter and TkinterDnD2 for the drag-and-drop graphical user interface.
+•	Pandas and NumPy for managing the FMA small dataset metadata.
+•	Availability: All tools are either open-source or available via my personal hardware.
+Demonstration Plans
+Demonstrations will be conducted live in the Julian Building Linux Lab. I will bring my personal laptop and the necessary adapters to display the interface on the projector. To ensure a successful demonstration, I will also have a screen-recorded backup of the core functionality.
+•	Live Interface: I will demonstrate the Tkinter GUI by dragging a raw .mp3 file from the desktop into the application.
+•	Processing View: I will show the real-time generation of the Mel-spectrogram.
+•	Classification: The system will output the predicted genre and confidence score live.
+•	Zoom Backup: If needed, I will join the class Zoom meeting to share my screen directly from my development environment.
+Qualifications
+I am highly qualified to complete this project due to my background in deep learning and hands-on experience with CNN architectures. In my previous Computer Science coursework, I developed a CNN-based classification system for identifying automobiles based on their year, make, and model. This project required me to curate a dataset of thousands of images, perform data augmentation, and tune hyperparameters to achieve high accuracy. The skills learned, specifically managing image tensors and optimizing convolutional layers, are directly applicable to spectrogram analysis.
+
+Furthermore, I have a strong foundation in algorithmic logic and data structures. I intend to further my knowledge in Machine Learning, and this project serves as a practical application of the theories I have studied. I am proficient in Python and have already conducted preliminary research into the Librosa library to understand the mathematical requirements of Mel-frequency cepstral coefficients (MFCCs).
+Project Specifications
+Functional Specifications
+
+•	Audio Input: The user can drag and drop .wav or .mp3 files into the GUI.
+•	Data Cleaning: The system filters the initial dataset to exclude tracks with missing or null genre labels to ensure a clean training set.
+•	Data Normalization: The system automatically clips or pads audio to a standard 30-second duration.
+•	Feature Extraction: The system generates a Mel-spectrogram image (224x224 pixels) for each input.
+•	Classification: The CNN predicts one of eight genres from the FMA small dataset (Electronic, Experimental, Folk, Hip-Hop, Instrumental, International, Pop, Rock).
+•	Confidence Reporting: The interface displays a percentage of certainty for the top prediction.
+
+User Interface Specification
+
+The UI is a minimalist desktop window built with Tkinter. It includes:
+•	Drop Zone: A central area with a dashed border that responds to file-drag events.
+•	Spectrogram Display: A dedicated canvas that renders the Mel-spectrogram of the uploaded file.
+•	Results Panel: A text area displaying the predicted genre in a bold, readable font.
+Technical Details
+AudioTexture implements a sophisticated deep learning pipeline to bridge raw audio signals and classification results. The implementation utilizes the FMA small dataset, which consists of 8,000 tracks organized in a hierarchical directory structure (folders 000 through 155). The system uses the tracks.csv metadata file to map these files to their respective labels using the Pandas library for efficient data manipulation.
+1.	Preprocessing and Signal Processing
+a.	The primary challenge of this project is converting time-series audio data into high-quality visual data suitable for computer vision. I will use the librosa.feature.melspectrogram function to achieve this.
+b.	FFT Parameters: I have chosen a window size FFT of 2048 and a hop length of 512. These parameters provide an optimal balance between time and frequency resolution, allowing the system to capture both sharp rhythmic transients (essential for genres like Hip-Hop) and sustained harmonic textures (essential for Soul).
+c.	Mel-Scale Conversion: The resulting power spectrogram is converted to the Mel-scale, which non-linearly maps frequencies to better mimic human auditory perception. Finally, the amplitude is converted to decibels (log-scale) to ensure the features are normalized for the neural network.
+d.	File Structure: Preprocessed spectrograms will be saved as image files to reduce the overhead of re-calculating the FFT during the iterative model training process on Google Colab.
+2.	Model Architecture
+The core of AudioTexture is a Sequential Convolutional Neural Network (CNN). The following architecture is currently proposed to balance depth with local inference speed; however, this design is subject to change as the model has not yet been empirically tested against the specific nuances and auditory features of the FMA small dataset.
+a.	Convolutional Layers: The model will feature three distinct Conv2D layers with 32, 64, and 128 filters respectively, each using a 3 X 3 kernel. These layers act as automated feature extractors, identifying low-level edges and high-level patterns within the spectral imagery.
+b.	Regularization: Each convolutional layer is followed by a Batch Normalization layer and a ReLU activation function. To mitigate the high risk of overfitting on the relatively small 8,000-sample dataset, I will implement Dropout layers (with a rate of 0.3) after the Max-Pooling stages and the final dense layers.
+c.	Output Stage: The final architecture includes a Global Average Pooling layer or a Flatten layer followed by two Dense layers. The final output layer uses a Softmax activation function to generate a probability distribution across the eight target genres.
+
+
+3.	Training and Optimization
+a.	Training will be conducted in a GPU-accelerated Google Colab environment to significantly reduce the time required for backpropagation.
+b.	Optimization: I will use the Adam optimizer with an initial learning rate of 0.001. Adam is chosen for its adaptive learning rate capabilities, which typically leads to faster convergence in audio classification tasks compared to standard Stochastic Gradient Descent.
+c.	Loss Function: The system uses Categorical Crossentropy as the loss function, which is the industry standard for multi-class classification problems.
+d.	Evaluation Tradeoffs: I will evaluate the tradeoff between model complexity and responsiveness. A deeper model might provide a 2-3% increase in accuracy but could cause the local Tkinter GUI to lag during inference. My priority is maintaining a response time of under 3 seconds on a consumer-grade CPU, which may require pruning the network if initial benchmarks are too slow.
+Developer Work Plan
+•	Week of Feb 15: Write the full proposal, focusing on the signal processing justifications (15+ hrs). Double-check the feasibility of the local Keras model loading. Attend W Center appointment (1 hr). Finalize and submit full proposal (2 hrs) Total: 18 hours+.
+•	Week of Feb 22: Start Checkpoint 1 items: write the pandas script for cleaning tracks.csv (3 hrs); code the TkinterDnD2 shell (3 hrs); implement the batch processing loop for spectrogram generation (3 hrs); design the basic results layout (4 hrs); gather peer feedback on the UI shell (2 hrs). Schedule S Center appointment. Total: 15 hours.
+•	Week of Mar 2: Checkpoint 1 Presentation. Finalize the folder-to-spectrogram pipeline (5 hrs). Practice presentation and record backup videos (3 hrs). Backup project code and upload to Moodle. Configure and test Google Colab GPU runtime environment with initial model architecture (1 hrs). Attend S Center appointment (1 hr). Total: 11 hours.
+•	Week of Mar 8: Start Checkpoint 2 work. Implement Librosa sliding window processing (3 hrs). Map audio buffer to Mel-spectrogram conversion (4 hrs); code the canvas display for images (3 hrs); test the drag-and-drop trigger with various file formats (1 hr);  Create test cases for file types. Prepare Checkpoint 2 slides and record live demo (3 hrs). Total: 14hours.
+•	Week of Mar 16: Checkpoint 2 Presentation. Use remaining time to begin Google Colab environment setup and initial model layer testing (8 hrs). Implement the threading logic for the backend (7 hrs). I will spend limited time monitoring initial long-running training tests on Colab (2 hrs). Total: 17hours.
+•	Week of Mar 23: Spring Break.
+•	Week of Mar 30: Class Ethics Discussion. Focus on Checkpoint 3 work: conduct full training on the 8,000-track dataset on Colab (8 hrs); tune hyperparameters and dropout rates (8 hrs). Total: 16 hours.
+•	Week of Apr 6: Checkpoint 3 Presentation. (No Class). Design and skin the custom Tkinter progress bar (3 hrs). Write the backend logic to map probability distributions from your model's softmax output to descriptive genre strings (4 hrs). Implement and test smooth UI transitions and real-time text updates as the inference results are processed (3 hrs).  Export the model and verify local loading in the Windows app (3 hrs). Record demo and upload slides (2 hrs). Total: 15 hours.
+•	Week of Apr 13: Start Checkpoint 4 work. Refine the GUI results panel for confidence percentages (3 hrs); implement robust error handling for invalid files (5 hrs); finalize the threading stability (9 hrs). Total: 17 hours.
+•	Week of Apr 20: Designing and testing the algorithm that maps multi-class probability arrays to descriptive "vibe" strings (4 hrs). Debugging the after() loop in Tkinter to ensure the progress bar animates smoothly in parallel with the backend inference engine (3hrs). Customizing ttk styles for a modern aesthetic and performing "hallway usability tests" to ensure the results are intuitive to a non-technical user (3 hrs). Start the final report (3 hrs). Schedule W and S center appointments. Total: 13 hours.
+•	Week of Apr 27: Checkpoint 4 Presentation. Finalize the final report (10 hrs); prepare final slides and recordings (3 hrs); edit and upload the report (4 hrs). Total: 17 hours.
+•	Week of May 4: Final updates to report and project code. Upload all final materials to Moodle. Total: 2 hours.
+Timeline
+Checkpoint #1 (Week of March 2)
+•	Deliverable 1: I will demonstrate a functional pandas script that successfully cleans and filters the FMA metadata for the 8 target genres.
+•	Deliverable 2: I will demonstrate the TkinterDnD2 shell successfully receiving a dragged file, parsing the file path, and displaying a placeholder "Results" layout.
+Checkpoint #2 (Week of March 16)
+•	Deliverable 1: I will demonstrate the audio-to-image pipeline, showing the conversion of a user-provided MP3 into a Mel-spectrogram using Librosa.
+•	Deliverable 2: I will demonstrate the Canvas display integration, where the generated spectrogram is rendered within the GUI shell in real-time.
+Checkpoint #3 (Week of April 6)
+•	Deliverable 1: I will demonstrate the trained Keras model (exported from Colab) performing local inference on audio files within the Windows environment.
+•	Deliverable 2: I will demonstrate the UI progress bar and loading states, showing how the app maintains responsiveness while the backend model is "thinking."
+Checkpoint #4 (Week of April 27):
+•	Deliverable 1: I will demonstrate the Final Integrated Application, featuring the genre analysis heuristic that maps raw model output to descriptive, human-readable genre strings.
+•	Deliverable 2: I will demonstrate threading stability by processing multiple files in sequence without the GUI freezing or crashing, including proper error handling for invalid file types.
+Future Enhancements
+•	Multi-label Tagging for Hybrid Genres: Modern music increasingly blurs traditional boundaries, resulting in hybrid styles such as Jazz-Fusion, Trap-Soul, or Psychedelic Rock. The current architecture is proposed to employ a "winner-take-all" softmax activation, but a future iteration would utilize sigmoid activation functions on the output layer to allow for multi-label classification. This would enable the system to assign multiple genre tags to a single track with independent confidence scores, providing a more nuanced and accurate acoustic profile for complex compositions that do not fit into a single category.
+•	Mood and BPM Detection: Beyond broad genre classification, independent musicians require granular metadata for professional synchronization and playlisting. This enhancement involves extending the CNN to detect emotional "valence" (e.g., happy, sad, aggressive) and rhythmic "energy" levels. Additionally, implementing an algorithmic Beats Per Minute (BPM) counter would significantly increase the utility of the application for DJs and music supervisors who rely on tempo matching for professional mixes and licensing opportunities.
+•	Porting to a Mobile-Friendly Web API: While the current version is a localized desktop application, migrating the inference engine to a cloud-based web API would drastically increase accessibility. By utilizing a web framework such as FastAPI or Flask, the model could be hosted on a remote server, allowing users to upload audio via a mobile-friendly web interface. This architectural shift would move the heavy computational load of the CNN to the cloud, enabling musicians to tag their demos instantly from any device without requiring high-performance local hardware.	
+
+Ethical Considerations
+The proposal should highlight any ethical considerations found throughout your project, whether that is in development and/or implementation for the programmer, or in using the product for the users or stakeholders. What do you need to think about ahead of time in order to mitigate ethical concerns? What do you need to acknowledge could be an ethical concern? 
+
+Example:
+In developing AudioTexture, it's essential to acknowledge the ethical implications, particularly concerning algorithmic bias and dataset representation to ensure fairness, transparency, and responsible use of the platform.
+•	Transparency and Accountability: AudioTexture will prioritize transparency by providing clear explanations of its functioning to users. It will be made explicit that the platform serves as an advisory tool and reference, offering genre predictions and acoustic insights based on historical audio data and AI algorithms. The platform will empower users to use the information provided as a reference point and not as an absolute decision-making tool. Users will be informed that these predictions may not always reflect the artist's original intent or cultural nuances, especially given that training data is influenced by specific dataset curation and Western-centric musical labeling.
+•	Risk Disclosure: AudioTexture will include a disclaimer stating that while the platform aims to provide valuable insights into musical texture, it does not guarantee industry success or royalty accuracy. Users will be reminded that automated tagging carries inherent risks of misrepresentation, particularly if the music being analyzed deviates significantly from the genres represented in the FMA small dataset. Decisions regarding official metadata and distribution should not solely rely on AI-generated predictions.
+•	AI Algorithm Transparency: AudioTexture will explain how the AI algorithms work in non-technical terms to enhance transparency. Specifically, it will explain how audio is converted into a visual "spectrogram" and how a neural network identifies visual patterns to estimate a track's genre.
+
+Bibliography
+Defferrard, Michaël, K. Benzi, P. Vandergheynst, and X. Bresson. "FMA: A Dataset for Music Analysis." International Society for Music Information Retrieval. ISMIR, 2017. Web. 16 Feb. 2026. https://github.com/mdeff/fma .
+"Librosa: Audio Processing in Python." Librosa.org. Librosa, 2024. Web. 16 Feb. 2026. https://librosa.org/ .
+"Tkinter Documentation." Python Software Foundation. Python, 2024. Web. 16 Feb. 2026. https://docs.python.org/3/library/tkinter.html .

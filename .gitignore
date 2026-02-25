@@ -1,0 +1,28 @@
+# FMA Dataset folders
+fma_metadata/
+fma_small/
+*summary*
+# Proposal documents
+*proposal*
+*Proposal*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.conda/
+.venv/
+venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
