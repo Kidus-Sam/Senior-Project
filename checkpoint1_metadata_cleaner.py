@@ -234,7 +234,7 @@ def clean_and_filter_fma_metadata(metadata_path, audio_dir, output_path=None):
     # 3. Remove tracks with missing genre labels
     df_clean = remove_missing_values(df_filtered)
 
-    # 4. NEW: Verify physical .mp3 existence
+    # 4. Verify physical .mp3 existence
     df_verified = verify_physical_files(df_clean, audio_dir)
 
     # 5. Generate summary and save
@@ -248,11 +248,10 @@ def clean_and_filter_fma_metadata(metadata_path, audio_dir, output_path=None):
     return df_verified
 
 if __name__ == "__main__":
-    # Update these paths to your local Windows environment
     metadata_base = "c:\\Users\\kidus\\Desktop\\Senior Project 2\\fma_metadata\\fma_metadata"
     metadata_path = os.path.join(metadata_base, "raw_tracks.csv")
     
-    # Path to where your 000, 001... folders are located
-    audio_dir = "c:\\Users\\kidus\\Desktop\\Senior Project 2\\fma_small" 
+    # Path to where your 000, 001... folders are located (note the nested fma_small)
+    audio_dir = "c:\\Users\\kidus\\Desktop\\Senior Project 2\\fma_small\\fma_small" 
     
     cleaned_df = clean_and_filter_fma_metadata(metadata_path, audio_dir)
