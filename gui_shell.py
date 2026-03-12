@@ -53,7 +53,7 @@ class AudioTextureGUI:
         """Initialize the AudioTexture GUI."""
         self.root = root
         self.root.title("AudioTexture - Music Genre Classification")
-        self.root.geometry("1000x700")
+        self.root.geometry("1000x800")
         self.root.resizable(True, True)
         
         # Current state
