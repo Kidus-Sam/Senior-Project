@@ -1,0 +1,578 @@
+"""
+AudioTexture GUI with Real-Time Mel-Spectrogram Rendering
+This GUI receives dropped audio files, converts them to Mel-spectrograms with Librosa,
+and renders the result live in the canvas.
+"""
+
+import tkinter as tk
+from tkinter import ttk
+from tkinter import filedialog
+import threading
+import os
+import shutil
+import warnings
+import time
+from pathlib import Path
+from io import BytesIO
+
+import numpy as np
+import librosa
+import librosa.display
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from PIL import Image, ImageTk
+
+try:
+    from audioread.exceptions import NoBackendError
+except Exception:
+    NoBackendError = RuntimeError
+
+# Signal processing constants aligned with your workplan
+SAMPLE_RATE = 22050
+N_FFT = 2048
+HOP_LENGTH = 512
+N_MELS = 128
+DURATION = 30.0
+
+# Try to import TkinterDnD2
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    HAS_DND = True
+except ImportError:
+    print("Warning: tkinterdnd2 not installed. Drag-and-drop will be limited.")
+    HAS_DND = False
+    TkinterDnD = None
+    DND_FILES = None
+
+
+class AudioTextureGUI:
+    """Main GUI class for AudioTexture application."""
+    
+    def __init__(self, root):
+        """Initialize the AudioTexture GUI."""
+        self.root = root
+        self.root.title("AudioTexture - Music Genre Classification")
+        self.root.geometry("1000x700")
+        self.root.resizable(True, True)
+        
+        # Current state
+        self.current_file = None
+        self.current_genre = None
+        self.current_confidence = None
+        self.current_spec_image = None
+        self.current_mel_image = None
+        self.current_mel_shape = None
+
+        # Prediction engine (stub today, swappable with trained model later)
+        self.predictor = GenrePredictor()
+        
+        # Configure style
+        self.setup_styles()
+        
+        # Build the layout
+        self.build_ui()
+        
+    
+    def setup_styles(self):
+        """Configure ttk styles for modern appearance."""
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Configure colors
+        bg_color = "#f0f0f0"
+        accent_color = "#2196F3"
+        text_color = "#333333"
+        
+        style.configure('TFrame', background=bg_color)
+        style.configure('TLabel', background=bg_color, foreground=text_color)
+        style.configure('Header.TLabel', font=('Segoe UI', 16, 'bold'), 
+                       background=bg_color, foreground=accent_color)
+        style.configure('Subheader.TLabel', font=('Segoe UI', 12, 'bold'),
+                       background=bg_color, foreground=text_color)
+        style.configure('Info.TLabel', font=('Segoe UI', 10),
+                       background=bg_color, foreground=text_color)
+        
+        self.root.configure(bg=bg_color)
+    
+    
+    def build_ui(self):
+        """Build the main UI layout."""
+        # Main container
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Header
+        header_label = ttk.Label(main_frame, text="AudioTexture", 
+                                 style='Header.TLabel')
+        header_label.pack(pady=(0, 10))
+        
+        subtitle_label = ttk.Label(main_frame, 
+                                   text="AI-Powered Music Genre Classification",
+                                   style='Info.TLabel')
+        subtitle_label.pack(pady=(0, 30))
+        
+        # Main content area - split into two columns
+        content_frame = ttk.Frame(main_frame)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Left side - Drop zone and file info
+        left_frame = ttk.Frame(content_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        
+        self.build_drop_zone(left_frame)
+        self.build_file_info_panel(left_frame)
+        
+        # Right side - Results and spectrogram
+        right_frame = ttk.Frame(content_frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        
+        self.build_results_panel(right_frame)
+    
+    
+    def build_drop_zone(self, parent):
+        """Build the drag-and-drop zone."""
+        drop_frame = ttk.LabelFrame(parent, text="Drop Zone", padding=20)
+        drop_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # Create a canvas for the dashed border effect
+        self.drop_canvas = tk.Canvas(drop_frame, bg="white", highlightthickness=2,
+                                     highlightbackground="#CCCCCC", height=200)
+        self.drop_canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Dashed border rectangle
+        self.drop_canvas.create_rectangle(5, 5, 395, 195, outline="#2196F3",
+                                          width=2, dash=(5, 5))
+        
+        # Instructions text
+        self.drop_text = self.drop_canvas.create_text(
+            200, 100,
+            text="Drag and drop MP3 or WAV file here",
+            font=('Segoe UI', 14, 'bold'),
+            fill="#999999"
+        )
+        
+        # Bind drag-and-drop events
+        if HAS_DND and DND_FILES is not None:
+            drop_register = getattr(self.drop_canvas, 'drop_target_register', None)
+            dnd_bind = getattr(self.drop_canvas, 'dnd_bind', None)
+            if callable(drop_register) and callable(dnd_bind):
+                drop_register(DND_FILES)
+                dnd_bind('<<Drop>>', self.on_file_drop)
+                dnd_bind('<<DragEnter>>', self.on_drag_enter)
+                dnd_bind('<<DragLeave>>', self.on_drag_leave)
+
+        # Fallback click-to-browse support if drag-and-drop is unavailable
+        self.drop_canvas.bind('<Button-1>', self.on_browse_click)
+    
+    
+    def on_drag_enter(self, event):
+        """Handle drag enter event."""
+        self.drop_canvas.configure(highlightbackground="#2196F3")
+        self.drop_canvas.itemconfig(self.drop_text, fill="#2196F3")
+    
+    
+    def on_drag_leave(self, event):
+        """Handle drag leave event."""
+        self.drop_canvas.configure(highlightbackground="#CCCCCC")
+        if not self.current_file:
+            self.drop_canvas.itemconfig(self.drop_text, fill="#999999")
+    
+    
+    def on_file_drop(self, event):
+        """Handle file drop event."""
+        # Extract file path from event data
+        file_path = event.data
+        
+        # Clean up file path (remove extra braces on Windows)
+        if file_path.startswith('{') and file_path.endswith('}'):
+            file_path = file_path[1:-1]
+        
+        # Validate file extension
+        valid_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.ogg']
+        file_ext = Path(file_path).suffix.lower()
+        
+        if file_ext not in valid_extensions:
+            self.show_error(f"Invalid file type: {file_ext}\nSupported: {', '.join(valid_extensions)}")
+            return
+        
+        # Set current file and update UI
+        self.current_file = file_path
+        self.update_file_display(file_path)
+        
+        # Start real audio processing pipeline
+        self.start_processing(file_path)
+
+
+    def on_browse_click(self, _event):
+        """Fallback file picker for environments without drag-and-drop support."""
+        file_path = filedialog.askopenfilename(
+            title="Select an audio file",
+            filetypes=[
+                ("Audio Files", "*.mp3 *.wav *.m4a *.flac *.ogg"),
+                ("All Files", "*.*")
+            ]
+        )
+        if not file_path:
+            return
+
+        self.current_file = file_path
+        self.update_file_display(file_path)
+        self.start_processing(file_path)
+    
+    
+    def update_file_display(self, file_path):
+        """Update the display to show the selected file."""
+        file_name = Path(file_path).name
+        self.drop_canvas.itemconfig(self.drop_text, 
+                                   text=f"✓ File loaded:\n{file_name}",
+                                   fill="#4CAF50")
+        self.file_info_content.config(state=tk.NORMAL)
+        self.file_info_content.delete('1.0', tk.END)
+        self.file_info_content.insert('1.0', f"File: {file_name}\nPath: {file_path}")
+        self.file_info_content.config(state=tk.DISABLED)
+    
+    
+    def build_file_info_panel(self, parent):
+        """Build the file information panel."""
+        info_frame = ttk.LabelFrame(parent, text="File Information", padding=10)
+        info_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.file_info_content = tk.Text(info_frame, height=5, width=40,
+                                         state=tk.DISABLED, wrap=tk.WORD,
+                                         font=('Courier New', 10))
+        self.file_info_content.pack(fill=tk.BOTH, expand=True)
+        
+        # Add placeholder text
+        self.file_info_content.config(state=tk.NORMAL)
+        self.file_info_content.insert('1.0', "Awaiting file...\n\nDrop an audio file in the zone above.")
+        self.file_info_content.config(state=tk.DISABLED)
+    
+    
+    def build_results_panel(self, parent):
+        """Build the results panel (genre prediction)."""
+        # Results header
+        results_label = ttk.Label(parent, text="Classification Results", 
+                                  style='Subheader.TLabel')
+        results_label.pack(pady=(0, 15))
+        
+        # Results frame with border
+        results_frame = ttk.LabelFrame(parent, text="Genre Prediction", padding=20)
+        results_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Genre display (large)
+        self.genre_label = ttk.Label(results_frame, 
+                                     text="Awaiting classification...",
+                                     font=('Segoe UI', 24, 'bold'),
+                                     foreground="#2196F3")
+        self.genre_label.pack(pady=20)
+        
+        # Confidence display
+        confidence_frame = ttk.Frame(results_frame)
+        confidence_frame.pack(fill=tk.X, pady=15)
+        
+        ttk.Label(confidence_frame, text="Confidence:", 
+                 style='Info.TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.confidence_label = ttk.Label(confidence_frame, 
+                                         text="0%",
+                                         font=('Segoe UI', 14, 'bold'),
+                                         foreground="#4CAF50")
+        self.confidence_label.pack(side=tk.LEFT)
+        
+        # Progress bar for processing
+        ttk.Label(results_frame, text="Processing Status:", 
+                 style='Info.TLabel').pack(pady=(15, 5))
+        
+        self.progress_bar = ttk.Progressbar(results_frame, length=300, 
+                                           mode='indeterminate')
+        self.progress_bar.pack(fill=tk.X, pady=(0, 15))
+        
+        # Status message
+        self.status_label = ttk.Label(results_frame, text="Ready",
+                                      style='Info.TLabel', foreground="#666666")
+        self.status_label.pack()
+
+        self.metrics_label = ttk.Label(
+            results_frame,
+            text="",
+            style='Info.TLabel',
+            foreground="#666666"
+        )
+        self.metrics_label.pack(pady=(4, 0))
+        
+        # Spectrogram canvas placeholder
+        ttk.Label(results_frame, text="Mel-Spectrogram Visualization:", 
+                 style='Info.TLabel').pack(pady=(20, 10))
+        
+        self.spec_canvas = tk.Canvas(results_frame, bg="#f5f5f5", 
+                                     highlightbackground="#CCCCCC",
+                                     height=150)
+        self.spec_canvas.pack(fill=tk.BOTH, expand=True)
+
+        self.save_button = ttk.Button(
+            results_frame,
+            text="Save Spectrogram",
+            command=self.save_current_spectrogram,
+            state=tk.DISABLED
+        )
+        self.save_button.pack(pady=(10, 0), anchor='e')
+        
+        # Draw placeholder
+        self.spec_canvas.create_text(
+            220,
+            75,
+            text="[Spectrogram will display here]",
+            fill="#CCCCCC",
+            font=('Segoe UI', 12)
+        )
+    
+    
+    def start_processing(self, file_path):
+        """Start processing the file in a background thread."""
+        self.progress_bar.start()
+        self.status_label.config(text="Generating Mel-spectrogram...", foreground="#FF9800")
+        self.metrics_label.config(text="")
+        self.genre_label.config(text="Analyzing...")
+        self.confidence_label.config(text="--")
+        self.save_button.config(state=tk.DISABLED)
+        
+        # Run processing in background thread
+        thread = threading.Thread(target=self.process_file, args=(file_path,))
+        thread.daemon = True
+        thread.start()
+    
+    
+    def process_file(self, file_path):
+        """Convert audio file to Mel-spectrogram and update UI."""
+        try:
+            t0 = time.perf_counter()
+            mel_image, mel_db = audio_to_mel_image(file_path)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+            predicted_genre, confidence = self.predictor.predict_from_mel(mel_db)
+
+            self.root.after(
+                0,
+                self.update_results,
+                predicted_genre,
+                confidence,
+                mel_image,
+                mel_db.shape,
+                elapsed_ms
+            )
+        except Exception as e:
+            self.root.after(0, self.show_error, f"Processing failed: {e}")
+    
+    
+    def update_results(self, genre, confidence, mel_image, mel_shape, elapsed_ms):
+        """Update the results display."""
+        self.progress_bar.stop()
+        self.current_genre = genre
+        self.current_confidence = confidence
+        self.current_mel_image = mel_image
+        self.current_mel_shape = mel_shape
+        
+        self.genre_label.config(text=genre)
+        self.confidence_label.config(text=f"{confidence}%")
+        self.status_label.config(text="Mel-spectrogram generated and displayed", foreground="#4CAF50")
+        self.metrics_label.config(text=f"Processing time: {elapsed_ms:.0f} ms | Mel shape: {mel_shape}")
+        self.render_spectrogram_on_canvas(mel_image)
+        self.save_button.config(state=tk.NORMAL)
+
+
+    def render_spectrogram_on_canvas(self, image):
+        """Render a PIL image into the spectrogram canvas."""
+        self.spec_canvas.update_idletasks()
+        canvas_w = self.spec_canvas.winfo_width() or 440
+        canvas_h = self.spec_canvas.winfo_height() or 150
+
+        # Fit image to canvas while preserving aspect ratio.
+        img_copy = image.copy()
+        img_copy.thumbnail((canvas_w - 4, canvas_h - 4), Image.Resampling.LANCZOS)
+
+        self.current_spec_image = ImageTk.PhotoImage(img_copy)
+        self.spec_canvas.delete('all')
+        self.spec_canvas.create_image(canvas_w // 2, canvas_h // 2, image=self.current_spec_image)
+    
+    
+    def show_error(self, message):
+        """Display an error message."""
+        self.progress_bar.stop()
+        self.status_label.config(text=f"Error: {message}", foreground="#F44336")
+        self.metrics_label.config(text="")
+        self.save_button.config(state=tk.DISABLED)
+
+
+    def save_current_spectrogram(self):
+        """Save the currently rendered Mel-spectrogram to disk."""
+        if self.current_mel_image is None:
+            self.show_error("No spectrogram available to save")
+            return
+
+        base_name = "spectrogram"
+        if self.current_file:
+            base_name = Path(self.current_file).stem + "_mel"
+
+        save_path = filedialog.asksaveasfilename(
+            title="Save spectrogram image",
+            defaultextension=".png",
+            initialfile=f"{base_name}.png",
+            filetypes=[("PNG Image", "*.png")]
+        )
+        if not save_path:
+            return
+
+        try:
+            self.current_mel_image.save(save_path, format="PNG")
+            self.status_label.config(text=f"Saved spectrogram: {Path(save_path).name}", foreground="#4CAF50")
+        except Exception as exc:
+            self.show_error(f"Save failed: {exc}")
+
+
+class GenrePredictor:
+    """
+    Model hook for genre inference.
+    This currently uses a deterministic mel-feature stub and is ready to be
+    replaced with a trained Keras model in Checkpoint 3.
+    """
+
+    def __init__(self):
+        self.labels = [
+            'Electronic', 'Experimental', 'Folk', 'Hip-Hop',
+            'Instrumental', 'International', 'Pop', 'Rock'
+        ]
+
+    def predict_from_mel(self, mel_db):
+        """
+        Return (genre, confidence_percent) using mel statistics.
+        """
+        # Feature vector derived from spectral texture
+        mean_energy = float(np.mean(mel_db))
+        spread = float(np.std(mel_db))
+        high_band = float(np.mean(mel_db[-16:, :]))
+        low_band = float(np.mean(mel_db[:16, :]))
+        rhythm_proxy = float(np.std(np.diff(mel_db, axis=1)))
+
+        features = np.array([mean_energy, spread, high_band, low_band, rhythm_proxy], dtype=np.float32)
+
+        # Fixed random-like projection for deterministic pseudo-probabilities
+        W = np.array([
+            [0.4, -0.2, 0.3, -0.1, 0.2],
+            [0.2, 0.3, -0.1, 0.4, -0.2],
+            [-0.1, 0.5, -0.3, 0.2, 0.1],
+            [0.3, -0.4, 0.2, 0.1, 0.2],
+            [-0.3, 0.2, 0.4, -0.2, 0.3],
+            [0.1, -0.1, 0.2, 0.4, 0.3],
+            [0.2, 0.1, -0.2, 0.3, -0.1],
+            [0.3, 0.2, 0.1, -0.3, 0.2],
+        ], dtype=np.float32)
+        b = np.array([0.3, 0.1, 0.0, 0.2, -0.1, 0.0, 0.15, 0.05], dtype=np.float32)
+
+        logits = W @ features + b
+        logits = logits - np.max(logits)
+        probs = np.exp(logits)
+        probs = probs / np.sum(probs)
+
+        idx = int(np.argmax(probs))
+        confidence = int(round(float(probs[idx]) * 100.0))
+        return self.labels[idx], max(1, min(confidence, 99))
+
+
+def audio_to_mel_image(file_path):
+    """
+    Convert an audio file into a Mel-spectrogram PIL image.
+    """
+    _ensure_ffmpeg_backend()
+
+    # Load and normalize duration
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', message='PySoundFile failed. Trying audioread instead.')
+            warnings.filterwarnings('ignore', message='librosa.core.audio.__audioread_load')
+            audio, _ = librosa.load(file_path, sr=SAMPLE_RATE, duration=DURATION, mono=True)
+    except NoBackendError as exc:
+        raise RuntimeError(
+            "Could not decode this audio format. Install ffmpeg or convert the file to WAV/MP3."
+        ) from exc
+    except Exception as exc:
+        # Provide a clearer message for unsupported/corrupt files.
+        raise RuntimeError(f"Audio load failed: {exc}") from exc
+
+    target_len = int(SAMPLE_RATE * DURATION)
+    if len(audio) < target_len:
+        audio = np.pad(audio, (0, target_len - len(audio)), mode='constant')
+    else:
+        audio = audio[:target_len]
+
+    # Generate Mel-spectrogram and convert to dB scale
+    mel_spec = librosa.feature.melspectrogram(
+        y=audio,
+        sr=SAMPLE_RATE,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH,
+        n_mels=N_MELS,
+        fmax=8000
+    )
+    mel_db = librosa.power_to_db(mel_spec, ref=np.max)
+
+    # Render to in-memory PNG and return PIL image
+    fig, ax = plt.subplots(figsize=(4.4, 1.5), dpi=100)
+    librosa.display.specshow(
+        mel_db,
+        sr=SAMPLE_RATE,
+        hop_length=HOP_LENGTH,
+        x_axis='time',
+        y_axis='mel',
+        cmap='magma',
+        ax=ax
+    )
+    ax.set_title('Mel-Spectrogram', fontsize=9)
+    ax.tick_params(axis='both', labelsize=7)
+    plt.tight_layout(pad=0.2)
+
+    buf = BytesIO()
+    fig.savefig(buf, format='png')
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf).convert('RGB'), mel_db
+
+
+def _ensure_ffmpeg_backend():
+    """
+    Make a bundled ffmpeg binary discoverable for audioread when available.
+    """
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_path = Path(ffmpeg_exe)
+        ffmpeg_dir = str(ffmpeg_path.parent)
+
+        # audioread searches for "ffmpeg" command name specifically.
+        ffmpeg_alias = ffmpeg_path.parent / 'ffmpeg.exe'
+        if not ffmpeg_alias.exists():
+            try:
+                shutil.copyfile(ffmpeg_path, ffmpeg_alias)
+            except Exception:
+                pass
+
+        current_path = os.environ.get('PATH', '')
+        if ffmpeg_dir and ffmpeg_dir not in current_path:
+            os.environ['PATH'] = ffmpeg_dir + os.pathsep + current_path
+    except Exception:
+        # If unavailable, librosa will still try native backends.
+        pass
+
+
+def main():
+    """Main entry point."""
+    if HAS_DND and TkinterDnD is not None:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
+    app = AudioTextureGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
