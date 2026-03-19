@@ -63,6 +63,9 @@ class AudioTextureGUI:
         self.current_spec_image = None
         self.current_mel_image = None
         self.current_mel_shape = None
+        self.processing_active = False
+        self.processing_started_at = None
+        self.telemetry_after_id = None
 
         # Prediction engine (stub today, swappable with trained model later)
         self.predictor = GenrePredictor()
@@ -157,10 +160,14 @@ class AudioTextureGUI:
             drop_register = getattr(self.drop_canvas, 'drop_target_register', None)
             dnd_bind = getattr(self.drop_canvas, 'dnd_bind', None)
             if callable(drop_register) and callable(dnd_bind):
-                drop_register(DND_FILES)
-                dnd_bind('<<Drop>>', self.on_file_drop)
-                dnd_bind('<<DragEnter>>', self.on_drag_enter)
-                dnd_bind('<<DragLeave>>', self.on_drag_leave)
+                try:
+                    drop_register(DND_FILES)
+                    dnd_bind('<<Drop>>', self.on_file_drop)
+                    dnd_bind('<<DragEnter>>', self.on_drag_enter)
+                    dnd_bind('<<DragLeave>>', self.on_drag_leave)
+                except tk.TclError:
+                    # tkdnd command hooks are unavailable in this Tk root; keep browse fallback.
+                    pass
 
         # Fallback click-to-browse support if drag-and-drop is unavailable
         self.drop_canvas.bind('<Button-1>', self.on_browse_click)
@@ -310,6 +317,23 @@ class AudioTextureGUI:
                                      height=150)
         self.spec_canvas.pack(fill=tk.BOTH, expand=True)
 
+        # Telemetry overlay drawn on top of the spectrogram canvas.
+        self.telemetry_overlay_bg = self.spec_canvas.create_rectangle(
+            8, 8, 310, 44,
+            fill="#000000",
+            outline="",
+            stipple="gray50",
+            state='hidden'
+        )
+        self.telemetry_overlay_text = self.spec_canvas.create_text(
+            16, 26,
+            text="",
+            fill="#ffffff",
+            anchor='w',
+            font=('Segoe UI', 9, 'bold'),
+            state='hidden'
+        )
+
         self.save_button = ttk.Button(
             results_frame,
             text="Save Spectrogram",
@@ -319,7 +343,7 @@ class AudioTextureGUI:
         self.save_button.pack(pady=(10, 0), anchor='e')
         
         # Draw placeholder
-        self.spec_canvas.create_text(
+        self.placeholder_text_id = self.spec_canvas.create_text(
             220,
             75,
             text="[Spectrogram will display here]",
@@ -330,12 +354,21 @@ class AudioTextureGUI:
     
     def start_processing(self, file_path):
         """Start processing the file in a background thread."""
+        # Prevent launching multiple long-running FFT jobs at once.
+        if self.processing_active:
+            self.status_label.config(text="Processing already in progress...", foreground="#FF9800")
+            return
+
+        self.processing_active = True
+        self.processing_started_at = time.perf_counter()
         self.progress_bar.start()
         self.status_label.config(text="Generating Mel-spectrogram...", foreground="#FF9800")
-        self.metrics_label.config(text="")
+        self.metrics_label.config(text="Latency: calculating... | Mel shape: pending")
         self.genre_label.config(text="Analyzing...")
         self.confidence_label.config(text="--")
         self.save_button.config(state=tk.DISABLED)
+        self._set_canvas_telemetry("Processing... 0 ms | Mel: pending")
+        self._start_telemetry_loop()
         
         # Run processing in background thread
         thread = threading.Thread(target=self.process_file, args=(file_path,))
@@ -367,6 +400,8 @@ class AudioTextureGUI:
     
     def update_results(self, genre, confidence, mel_image, mel_shape, elapsed_ms):
         """Update the results display."""
+        self.processing_active = False
+        self._stop_telemetry_loop()
         self.progress_bar.stop()
         self.current_genre = genre
         self.current_confidence = confidence
@@ -378,6 +413,7 @@ class AudioTextureGUI:
         self.status_label.config(text="Mel-spectrogram generated and displayed", foreground="#4CAF50")
         self.metrics_label.config(text=f"Processing time: {elapsed_ms:.0f} ms | Mel shape: {mel_shape}")
         self.render_spectrogram_on_canvas(mel_image)
+        self._hide_canvas_telemetry()
         self.save_button.config(state=tk.NORMAL)
 
 
@@ -392,16 +428,71 @@ class AudioTextureGUI:
         img_copy.thumbnail((canvas_w - 4, canvas_h - 4), Image.Resampling.LANCZOS)
 
         self.current_spec_image = ImageTk.PhotoImage(img_copy)
-        self.spec_canvas.delete('all')
-        self.spec_canvas.create_image(canvas_w // 2, canvas_h // 2, image=self.current_spec_image)
+        self.spec_canvas.delete('spec_image')
+        placeholder_id = getattr(self, 'placeholder_text_id', None)
+        if placeholder_id is not None:
+            self.spec_canvas.delete(placeholder_id)
+            self.placeholder_text_id = None
+        self.spec_canvas.create_image(
+            canvas_w // 2,
+            canvas_h // 2,
+            image=self.current_spec_image,
+            tags='spec_image'
+        )
+        self.spec_canvas.tag_lower('spec_image')
+        self.spec_canvas.tag_raise(self.telemetry_overlay_bg)
+        self.spec_canvas.tag_raise(self.telemetry_overlay_text)
     
     
     def show_error(self, message):
         """Display an error message."""
+        self.processing_active = False
+        self._stop_telemetry_loop()
         self.progress_bar.stop()
         self.status_label.config(text=f"Error: {message}", foreground="#F44336")
         self.metrics_label.config(text="")
+        self._hide_canvas_telemetry()
         self.save_button.config(state=tk.DISABLED)
+
+
+    def _start_telemetry_loop(self):
+        """Start periodic UI-side telemetry updates while worker thread runs."""
+        self._stop_telemetry_loop()
+        self.telemetry_after_id = self.root.after(120, self._update_live_telemetry)
+
+
+    def _stop_telemetry_loop(self):
+        """Cancel periodic telemetry updates."""
+        if self.telemetry_after_id is not None:
+            self.root.after_cancel(self.telemetry_after_id)
+            self.telemetry_after_id = None
+
+
+    def _update_live_telemetry(self):
+        """Update latency text while processing is still active."""
+        if not self.processing_active or self.processing_started_at is None:
+            return
+
+        elapsed_ms = (time.perf_counter() - self.processing_started_at) * 1000.0
+        text = f"Latency: {elapsed_ms:.0f} ms | Mel shape: pending"
+        self.metrics_label.config(text=text)
+        self._set_canvas_telemetry(f"Processing... {elapsed_ms:.0f} ms | Mel: pending")
+        self.telemetry_after_id = self.root.after(120, self._update_live_telemetry)
+
+
+    def _set_canvas_telemetry(self, text):
+        """Show/update telemetry text overlay in the spectrogram canvas."""
+        self.spec_canvas.itemconfigure(self.telemetry_overlay_text, text=text)
+        self.spec_canvas.itemconfigure(self.telemetry_overlay_bg, state='normal')
+        self.spec_canvas.itemconfigure(self.telemetry_overlay_text, state='normal')
+        self.spec_canvas.tag_raise(self.telemetry_overlay_bg)
+        self.spec_canvas.tag_raise(self.telemetry_overlay_text)
+
+
+    def _hide_canvas_telemetry(self):
+        """Hide telemetry overlay from the spectrogram canvas."""
+        self.spec_canvas.itemconfigure(self.telemetry_overlay_bg, state='hidden')
+        self.spec_canvas.itemconfigure(self.telemetry_overlay_text, state='hidden')
 
 
     def save_current_spectrogram(self):

@@ -360,7 +360,7 @@ def main():
     stats = batch_process_spectrograms(
         metadata_path=METADATA_FILE,
         output_dir=OUTPUT_DIR,
-        max_tracks=100  # Change to None to process all tracks
+        max_tracks=None # Change to None to process all tracks
     )
     
     if stats:
@@ -370,7 +370,6 @@ def main():
         print("\n✓ Signal processing pipeline complete!")
         print(f"  Processed {stats['successful']} spectrograms successfully")
         print(f"  Ready for CNN training in Checkpoint 3")
-        print(f"\nTo process all {stats['total']} tracks, set max_tracks=None in the script")
 
 
 if __name__ == "__main__":
