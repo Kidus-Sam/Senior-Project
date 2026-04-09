@@ -18,6 +18,10 @@ from io import BytesIO
 import numpy as np
 import librosa
 import librosa.display
+try:
+    import tensorflow as tf
+except Exception:
+    tf = None
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -34,6 +38,7 @@ N_FFT = 2048
 HOP_LENGTH = 512
 N_MELS = 128
 DURATION = 30.0
+CHUNK_DURATION = 5.0
 
 # Try to import TkinterDnD2
 try:
@@ -383,7 +388,11 @@ class AudioTextureGUI:
             mel_image, mel_db = audio_to_mel_image(file_path)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-            predicted_genre, confidence = self.predictor.predict_from_mel(mel_db)
+            predicted_genre, confidence = self.predictor.predict_from_audio(
+                file_path,
+                mel_db=mel_db,
+                mel_image=mel_image
+            )
 
             self.root.after(
                 0,
@@ -533,11 +542,169 @@ class GenrePredictor:
             'Electronic', 'Experimental', 'Folk', 'Hip-Hop',
             'Instrumental', 'International', 'Pop', 'Rock'
         ]
+        self.model = None
+        self.model_name = None
+        self.use_nn = False
+        self._load_trained_models()
 
-    def predict_from_mel(self, mel_db):
-        """
-        Return (genre, confidence_percent) using mel statistics.
-        """
+
+    def _load_trained_models(self):
+        """Load a single best available Keras model for inference."""
+        if tf is None:
+            print("TensorFlow not available; using deterministic fallback predictor.")
+            return
+
+        project_root = Path(__file__).resolve().parent
+        candidate_dirs = [
+            project_root / 'Model data' / 'model_checkpoints',
+            project_root / 'model_checkpoints',
+        ]
+
+        ckpt_dir = None
+        for path in candidate_dirs:
+            if path.exists():
+                ckpt_dir = path
+                break
+
+        if ckpt_dir is None:
+            print("No checkpoint directory found; using deterministic fallback predictor.")
+            return
+
+        # Priority order: best production candidates first.
+        preferred = [
+            'final_chunk_retrained_resnet50.keras',
+            'chunk_retrain_stage3_best.keras',
+            'chunk_retrain_stage2_best.keras',
+            'final_adv_resnet50.keras',
+            'adv_resnet50_stage3_best.keras',
+            'final_adv_effnetv2b0.keras',
+            'adv_effnetv2b0_stage3_best.keras',
+            'finetuned_best.keras',
+            'hybrid_best.keras',
+            'refined_best.keras',
+            'baseline_best.keras',
+        ]
+
+        for name in preferred:
+            ckpt_path = ckpt_dir / name
+            if not ckpt_path.exists():
+                continue
+            try:
+                self.model = tf.keras.models.load_model(str(ckpt_path), compile=False)
+                self.model_name = name
+                self.use_nn = True
+                print(f"Loaded best model: {name}")
+                return
+            except Exception as exc:
+                print(f"Skipping model {name}: {exc}")
+
+        print("No loadable checkpoints found; using deterministic fallback predictor.")
+
+
+    def _prepare_engineered_tensor(self, mel_image):
+        """Build the same 3-channel engineered input used by advanced notebook training."""
+        if tf is None:
+            raise RuntimeError("TensorFlow is unavailable for neural inference.")
+        tfm = tf
+
+        # Keep preprocessing aligned with the notebook's advanced path.
+        img = np.asarray(mel_image.convert('RGB').resize((224, 224), Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
+        x = tfm.convert_to_tensor(img)
+        gray = tfm.image.rgb_to_grayscale(x)         # [H, W, 1]
+        gray_b = tfm.expand_dims(gray, axis=0)       # [1, H, W, 1]
+        sobel = tfm.image.sobel_edges(gray_b)        # [1, H, W, 1, 2]
+        sobel = tfm.squeeze(sobel, axis=0)           # [H, W, 1, 2]
+        gx = sobel[..., 0]
+        gy = sobel[..., 1]
+        gx = tfm.clip_by_value((gx + 1.0) * 0.5, 0.0, 1.0)
+        gy = tfm.clip_by_value((gy + 1.0) * 0.5, 0.0, 1.0)
+        engineered = tfm.concat([gray, gx, gy], axis=-1)
+        return tfm.expand_dims(engineered, axis=0)   # [1, H, W, 3]
+
+
+    def _predict_with_models(self, mel_image):
+        """Run prediction with the loaded neural model."""
+        if self.model is None:
+            raise RuntimeError("No neural model is loaded.")
+
+        x = self._prepare_engineered_tensor(mel_image)
+        probs = self.model(x, training=False).numpy()[0].astype(np.float32)
+        denom = float(np.sum(probs))
+        if denom <= 0.0:
+            raise RuntimeError("Model returned invalid probabilities.")
+        probs = probs / denom
+        idx = int(np.argmax(probs))
+        confidence = int(round(float(probs[idx]) * 100.0))
+        return self.labels[idx], max(1, min(confidence, 99))
+
+
+    def _load_audio_for_chunks(self, file_path):
+        """Load and normalize audio to a fixed 30-second window for chunk voting."""
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', message='PySoundFile failed. Trying audioread instead.')
+            warnings.filterwarnings('ignore', message='librosa.core.audio.__audioread_load')
+            audio, _ = librosa.load(file_path, sr=SAMPLE_RATE, duration=DURATION, mono=True)
+
+        target_len = int(SAMPLE_RATE * DURATION)
+        if len(audio) < target_len:
+            audio = np.pad(audio, (0, target_len - len(audio)), mode='constant')
+        else:
+            audio = audio[:target_len]
+        return audio
+
+
+    def _predict_from_audio_chunks(self, file_path):
+        """Predict with 5-second chunk voting using probability averaging."""
+        if self.model is None:
+            raise RuntimeError("No neural model is loaded.")
+
+        audio = self._load_audio_for_chunks(file_path)
+        chunk_len = int(SAMPLE_RATE * CHUNK_DURATION)
+        num_chunks = int(DURATION / CHUNK_DURATION)
+
+        probs_acc = np.zeros((len(self.labels),), dtype=np.float32)
+        used = 0
+
+        for i in range(num_chunks):
+            start = i * chunk_len
+            end = start + chunk_len
+            chunk_audio = audio[start:end]
+            if len(chunk_audio) < chunk_len:
+                chunk_audio = np.pad(chunk_audio, (0, chunk_len - len(chunk_audio)), mode='constant')
+
+            mel_spec = librosa.feature.melspectrogram(
+                y=chunk_audio,
+                sr=SAMPLE_RATE,
+                n_fft=N_FFT,
+                hop_length=HOP_LENGTH,
+                n_mels=N_MELS,
+                fmax=8000
+            )
+            mel_db = librosa.power_to_db(mel_spec, ref=np.max)
+
+            chunk_image = mel_db_to_model_image(mel_db)
+            x = self._prepare_engineered_tensor(chunk_image)
+            pred = self.model(x, training=False).numpy()[0].astype(np.float32)
+
+            probs_acc += pred
+            used += 1
+
+        if used == 0:
+            raise RuntimeError("No chunks available for prediction.")
+
+        probs = probs_acc / float(used)
+        denom = float(np.sum(probs))
+        if denom <= 0.0:
+            raise RuntimeError("Chunk voting produced invalid probabilities.")
+
+        probs = probs / denom
+        idx = int(np.argmax(probs))
+        confidence = int(round(float(probs[idx]) * 100.0))
+        return self.labels[idx], max(1, min(confidence, 99))
+
+
+    def _predict_stub(self, mel_db):
+        """Fallback deterministic predictor if no trained model is available."""
         # Feature vector derived from spectral texture
         mean_energy = float(np.mean(mel_db))
         spread = float(np.std(mel_db))
@@ -568,6 +735,42 @@ class GenrePredictor:
         idx = int(np.argmax(probs))
         confidence = int(round(float(probs[idx]) * 100.0))
         return self.labels[idx], max(1, min(confidence, 99))
+
+    def predict_from_mel(self, mel_db, mel_image=None):
+        """
+        Return (genre, confidence_percent) using trained model(s) when available.
+        """
+        if self.use_nn and mel_image is not None:
+            try:
+                return self._predict_with_models(mel_image)
+            except Exception as exc:
+                print(f"Neural inference failed, falling back to stub predictor: {exc}")
+
+        return self._predict_stub(mel_db)
+
+
+    def predict_from_audio(self, file_path, mel_db=None, mel_image=None):
+        """Primary inference path: chunk-voting neural prediction with safe fallback."""
+        if self.use_nn:
+            try:
+                return self._predict_from_audio_chunks(file_path)
+            except Exception as exc:
+                print(f"Chunk voting failed; attempting single-image fallback: {exc}")
+                if mel_image is not None and mel_db is not None:
+                    try:
+                        return self._predict_with_models(mel_image)
+                    except Exception as exc2:
+                        print(f"Single-image neural inference failed: {exc2}")
+
+        if mel_db is not None:
+            return self._predict_stub(mel_db)
+
+        # Last-resort fallback if mel_db wasn't provided.
+        try:
+            _, mel_db_local = audio_to_mel_image(file_path)
+            return self._predict_stub(mel_db_local)
+        except Exception as exc:
+            raise RuntimeError(f"Fallback prediction failed: {exc}") from exc
 
 
 def audio_to_mel_image(file_path):
@@ -627,6 +830,31 @@ def audio_to_mel_image(file_path):
     plt.close(fig)
     buf.seek(0)
     return Image.open(buf).convert('RGB'), mel_db
+
+
+def mel_db_to_model_image(mel_db, img_size=(224, 224)):
+    """Render mel dB array into the same image style used during batch training."""
+    dpi = 100
+    figsize = (img_size[0] / dpi, img_size[1] / dpi)
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    librosa.display.specshow(
+        mel_db,
+        sr=SAMPLE_RATE,
+        hop_length=HOP_LENGTH,
+        x_axis=None,
+        y_axis=None,
+        ax=ax,
+        cmap='viridis'
+    )
+    ax.axis('off')
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    buf = BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, dpi=dpi)
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf).convert('RGB')
 
 
 def _ensure_ffmpeg_backend():

@@ -3,7 +3,6 @@ fma_metadata/
 fma_small/
 processed_data/
 *summary*
-test_colab.ipynb
 # Proposal documents
 *proposal*
 *Proposal*
@@ -25,6 +24,5 @@ env/
 *.swp
 *.swo
 
-# OS files
-.DS_Store
-Thumbs.db
+#Models
+Model data/
