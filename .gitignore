@@ -26,3 +26,6 @@ env/
 
 #Models
 Model data/
+
+#mp3 files
+*.mp3

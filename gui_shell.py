@@ -20,8 +20,10 @@ import librosa
 import librosa.display
 try:
     import tensorflow as tf
+    from tensorflow import keras
 except Exception:
     tf = None
+    keras = None
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -545,7 +547,24 @@ class GenrePredictor:
         self.model = None
         self.model_name = None
         self.use_nn = False
+        self.input_mode = 'engineered_3ch'
+        self.use_chunk_voting = True
         self._load_trained_models()
+
+
+    def _configure_inference_profile(self):
+        """Select preprocessing/chunking profile based on loaded checkpoint family."""
+        name = (self.model_name or '').lower()
+
+        # Models trained on chunked + engineered pipeline.
+        if any(k in name for k in ('chunk_retrain', 'adv_resnet', 'resnet50_focal', 'adv_effnet', 'focal')):
+            self.input_mode = 'engineered_3ch'
+            self.use_chunk_voting = True
+            return
+
+        # Earlier single-image models were trained on RGB spectrogram images.
+        self.input_mode = 'raw_rgb'
+        self.use_chunk_voting = False
 
 
     def _load_trained_models(self):
@@ -573,9 +592,9 @@ class GenrePredictor:
         # Priority order: best production candidates first.
         preferred = [
             'final_chunk_retrained_resnet50.keras',
+            'final_adv_resnet50.keras',
             'chunk_retrain_stage3_best.keras',
             'chunk_retrain_stage2_best.keras',
-            'final_adv_resnet50.keras',
             'adv_resnet50_stage3_best.keras',
             'final_adv_effnetv2b0.keras',
             'adv_effnetv2b0_stage3_best.keras',
@@ -585,15 +604,46 @@ class GenrePredictor:
             'baseline_best.keras',
         ]
 
+        # Define ApplicationPreprocess for export-safe model deserialization
+        @keras.utils.register_keras_serializable(package='AudioTexture')
+        class ApplicationPreprocess(tf.keras.layers.Layer):
+            def __init__(self, mode, **kwargs):
+                super().__init__(**kwargs)
+                self.mode = mode
+
+            def call(self, inputs):
+                if self.mode == 'resnet50':
+                    return tf.keras.applications.resnet.preprocess_input(inputs)
+                if self.mode == 'efficientnetv2b0':
+                    return tf.keras.applications.efficientnet_v2.preprocess_input(inputs)
+                raise ValueError(f'Unknown preprocess mode: {self.mode}')
+
+            def get_config(self):
+                config = super().get_config()
+                config.update({'mode': self.mode})
+                return config
+
+        custom_objects = {
+            'preprocess_input': tf.keras.applications.resnet.preprocess_input,
+            'ApplicationPreprocess': ApplicationPreprocess,
+        }
+
         for name in preferred:
             ckpt_path = ckpt_dir / name
             if not ckpt_path.exists():
                 continue
             try:
-                self.model = tf.keras.models.load_model(str(ckpt_path), compile=False)
+                self.model = tf.keras.models.load_model(
+                    str(ckpt_path),
+                    compile=False,
+                    safe_mode=False,
+                    custom_objects=custom_objects,
+                )
                 self.model_name = name
                 self.use_nn = True
+                self._configure_inference_profile()
                 print(f"Loaded best model: {name}")
+                print(f"Inference profile -> mode: {self.input_mode}, chunk_voting: {self.use_chunk_voting}")
                 return
             except Exception as exc:
                 print(f"Skipping model {name}: {exc}")
@@ -622,12 +672,29 @@ class GenrePredictor:
         return tfm.expand_dims(engineered, axis=0)   # [1, H, W, 3]
 
 
+    def _prepare_raw_rgb_tensor(self, mel_image):
+        """Prepare plain RGB tensor for models trained on raw spectrogram images."""
+        if tf is None:
+            raise RuntimeError("TensorFlow is unavailable for neural inference.")
+
+        # Raw-RGB checkpoints in this project include internal preprocessing
+        # (Rescaling or preprocess_input), so keep pixel scale at 0..255.
+        img = np.asarray(
+            mel_image.convert('RGB').resize((224, 224), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        )
+        return tf.expand_dims(tf.convert_to_tensor(img), axis=0)
+
+
     def _predict_with_models(self, mel_image):
         """Run prediction with the loaded neural model."""
         if self.model is None:
             raise RuntimeError("No neural model is loaded.")
 
-        x = self._prepare_engineered_tensor(mel_image)
+        if self.input_mode == 'raw_rgb':
+            x = self._prepare_raw_rgb_tensor(mel_image)
+        else:
+            x = self._prepare_engineered_tensor(mel_image)
         probs = self.model(x, training=False).numpy()[0].astype(np.float32)
         denom = float(np.sum(probs))
         if denom <= 0.0:
@@ -657,6 +724,7 @@ class GenrePredictor:
         """Predict with 5-second chunk voting using probability averaging."""
         if self.model is None:
             raise RuntimeError("No neural model is loaded.")
+        model = self.model
 
         audio = self._load_audio_for_chunks(file_path)
         chunk_len = int(SAMPLE_RATE * CHUNK_DURATION)
@@ -683,8 +751,11 @@ class GenrePredictor:
             mel_db = librosa.power_to_db(mel_spec, ref=np.max)
 
             chunk_image = mel_db_to_model_image(mel_db)
-            x = self._prepare_engineered_tensor(chunk_image)
-            pred = self.model(x, training=False).numpy()[0].astype(np.float32)
+            if self.input_mode == 'raw_rgb':
+                x = self._prepare_raw_rgb_tensor(chunk_image)
+            else:
+                x = self._prepare_engineered_tensor(chunk_image)
+            pred = model(x, training=False).numpy()[0].astype(np.float32)
 
             probs_acc += pred
             used += 1
@@ -740,9 +811,11 @@ class GenrePredictor:
         """
         Return (genre, confidence_percent) using trained model(s) when available.
         """
-        if self.use_nn and mel_image is not None:
+        if self.use_nn:
             try:
-                return self._predict_with_models(mel_image)
+                # Always infer from training-style rendering to avoid UI-style drift.
+                model_image = mel_db_to_model_image(mel_db)
+                return self._predict_with_models(model_image)
             except Exception as exc:
                 print(f"Neural inference failed, falling back to stub predictor: {exc}")
 
@@ -752,15 +825,24 @@ class GenrePredictor:
     def predict_from_audio(self, file_path, mel_db=None, mel_image=None):
         """Primary inference path: chunk-voting neural prediction with safe fallback."""
         if self.use_nn:
-            try:
-                return self._predict_from_audio_chunks(file_path)
-            except Exception as exc:
-                print(f"Chunk voting failed; attempting single-image fallback: {exc}")
-                if mel_image is not None and mel_db is not None:
+            if self.use_chunk_voting:
+                try:
+                    return self._predict_from_audio_chunks(file_path)
+                except Exception as exc:
+                    print(f"Chunk voting failed; attempting single-image fallback: {exc}")
+                    if mel_db is not None:
+                        try:
+                            model_image = mel_db_to_model_image(mel_db)
+                            return self._predict_with_models(model_image)
+                        except Exception as exc2:
+                            print(f"Single-image neural inference failed: {exc2}")
+            else:
+                if mel_db is not None:
                     try:
-                        return self._predict_with_models(mel_image)
-                    except Exception as exc2:
-                        print(f"Single-image neural inference failed: {exc2}")
+                        model_image = mel_db_to_model_image(mel_db)
+                        return self._predict_with_models(model_image)
+                    except Exception as exc:
+                        print(f"Single-image neural inference failed; falling back to stub: {exc}")
 
         if mel_db is not None:
             return self._predict_stub(mel_db)
