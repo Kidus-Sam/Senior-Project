@@ -12,6 +12,7 @@ import os
 import shutil
 import warnings
 import time
+import csv
 from pathlib import Path
 from io import BytesIO
 
@@ -20,10 +21,8 @@ import librosa
 import librosa.display
 try:
     import tensorflow as tf
-    from tensorflow import keras
 except Exception:
     tf = None
-    keras = None
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -41,6 +40,7 @@ HOP_LENGTH = 512
 N_MELS = 128
 DURATION = 30.0
 CHUNK_DURATION = 5.0
+CONFIDENCE_THRESHOLD = 50
 
 # Try to import TkinterDnD2
 try:
@@ -261,6 +261,13 @@ class AudioTextureGUI:
         self.file_info_content.config(state=tk.NORMAL)
         self.file_info_content.insert('1.0', "Awaiting file...\n\nDrop an audio file in the zone above.")
         self.file_info_content.config(state=tk.DISABLED)
+
+        self.batch_button = ttk.Button(
+            info_frame,
+            text="Batch Folder -> CSV",
+            command=self.on_batch_infer_click,
+        )
+        self.batch_button.pack(pady=(8, 0), anchor='e')
     
     
     def build_results_panel(self, parent):
@@ -293,6 +300,14 @@ class AudioTextureGUI:
                                          font=('Segoe UI', 14, 'bold'),
                                          foreground="#4CAF50")
         self.confidence_label.pack(side=tk.LEFT)
+
+        self.top3_label = ttk.Label(
+            results_frame,
+            text="Top 3 Predictions:\n--",
+            style='Info.TLabel',
+            justify=tk.LEFT
+        )
+        self.top3_label.pack(anchor='w', pady=(0, 8))
         
         # Progress bar for processing
         ttk.Label(results_frame, text="Processing Status:", 
@@ -373,7 +388,9 @@ class AudioTextureGUI:
         self.metrics_label.config(text="Latency: calculating... | Mel shape: pending")
         self.genre_label.config(text="Analyzing...")
         self.confidence_label.config(text="--")
+        self.top3_label.config(text="Top 3 Predictions:\n--")
         self.save_button.config(state=tk.DISABLED)
+        self.batch_button.config(state=tk.DISABLED)
         self._set_canvas_telemetry("Processing... 0 ms | Mel: pending")
         self._start_telemetry_loop()
         
@@ -395,12 +412,18 @@ class AudioTextureGUI:
                 mel_db=mel_db,
                 mel_image=mel_image
             )
+            prediction_details = self.predictor.predict_details_from_audio(
+                file_path,
+                mel_db=mel_db,
+                mel_image=mel_image
+            )
 
             self.root.after(
                 0,
                 self.update_results,
                 predicted_genre,
                 confidence,
+                prediction_details,
                 mel_image,
                 mel_db.shape,
                 elapsed_ms
@@ -409,7 +432,7 @@ class AudioTextureGUI:
             self.root.after(0, self.show_error, f"Processing failed: {e}")
     
     
-    def update_results(self, genre, confidence, mel_image, mel_shape, elapsed_ms):
+    def update_results(self, genre, confidence, prediction_details, mel_image, mel_shape, elapsed_ms):
         """Update the results display."""
         self.processing_active = False
         self._stop_telemetry_loop()
@@ -418,14 +441,28 @@ class AudioTextureGUI:
         self.current_confidence = confidence
         self.current_mel_image = mel_image
         self.current_mel_shape = mel_shape
-        
-        self.genre_label.config(text=genre)
+
+        is_low_confidence = bool(prediction_details.get('is_low_confidence', False))
+        top3 = prediction_details.get('top3', [])
+
+        if is_low_confidence:
+            self.genre_label.config(text=f"Low confidence ({genre})", foreground="#FF9800")
+            self.status_label.config(text="Prediction is below confidence threshold", foreground="#FF9800")
+        else:
+            self.genre_label.config(text=genre, foreground="#2196F3")
+            self.status_label.config(text="Mel-spectrogram generated and displayed", foreground="#4CAF50")
+
         self.confidence_label.config(text=f"{confidence}%")
-        self.status_label.config(text="Mel-spectrogram generated and displayed", foreground="#4CAF50")
+        if top3:
+            lines = [f"{i + 1}. {item['genre']} ({item['confidence']}%)" for i, item in enumerate(top3[:3])]
+            self.top3_label.config(text="Top 3 Predictions:\n" + "\n".join(lines))
+        else:
+            self.top3_label.config(text="Top 3 Predictions:\n--")
         self.metrics_label.config(text=f"Processing time: {elapsed_ms:.0f} ms | Mel shape: {mel_shape}")
         self.render_spectrogram_on_canvas(mel_image)
         self._hide_canvas_telemetry()
         self.save_button.config(state=tk.NORMAL)
+        self.batch_button.config(state=tk.NORMAL)
 
 
     def render_spectrogram_on_canvas(self, image):
@@ -464,6 +501,109 @@ class AudioTextureGUI:
         self.metrics_label.config(text="")
         self._hide_canvas_telemetry()
         self.save_button.config(state=tk.DISABLED)
+        self.batch_button.config(state=tk.NORMAL)
+
+
+    def on_batch_infer_click(self):
+        """Run folder-level batch inference and export results to CSV."""
+        if self.processing_active:
+            self.status_label.config(text="Processing already in progress...", foreground="#FF9800")
+            return
+
+        folder_path = filedialog.askdirectory(title="Select folder with audio files")
+        if not folder_path:
+            return
+
+        csv_path = filedialog.asksaveasfilename(
+            title="Save batch results CSV",
+            defaultextension=".csv",
+            initialfile="batch_predictions.csv",
+            filetypes=[("CSV File", "*.csv")],
+        )
+        if not csv_path:
+            return
+
+        self.processing_active = True
+        self.progress_bar.start()
+        self.status_label.config(text="Running batch inference...", foreground="#FF9800")
+        self.metrics_label.config(text="Batch mode: processing files")
+        self.batch_button.config(state=tk.DISABLED)
+
+        thread = threading.Thread(target=self._run_batch_inference, args=(folder_path, csv_path), daemon=True)
+        thread.start()
+
+
+    def _run_batch_inference(self, folder_path, csv_path):
+        """Background batch inference worker."""
+        valid_extensions = {'.mp3', '.wav', '.m4a', '.flac', '.ogg'}
+        audio_files = [
+            p for p in sorted(Path(folder_path).iterdir())
+            if p.is_file() and p.suffix.lower() in valid_extensions
+        ]
+
+        rows = []
+        for audio_path in audio_files:
+            try:
+                t0 = time.perf_counter()
+                mel_image, mel_db = audio_to_mel_image(str(audio_path))
+                details = self.predictor.predict_details_from_audio(
+                    str(audio_path),
+                    mel_db=mel_db,
+                    mel_image=mel_image,
+                )
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+                top3 = details.get('top3', [])
+                rows.append({
+                    'filename': audio_path.name,
+                    'predicted_genre': details.get('genre', ''),
+                    'confidence': details.get('confidence', ''),
+                    'second_choice': top3[1]['genre'] if len(top3) > 1 else '',
+                    'third_choice': top3[2]['genre'] if len(top3) > 2 else '',
+                    'processing_ms': f"{elapsed_ms:.0f}",
+                    'low_confidence': str(bool(details.get('is_low_confidence', False))),
+                })
+            except Exception as exc:
+                rows.append({
+                    'filename': audio_path.name,
+                    'predicted_genre': '',
+                    'confidence': '',
+                    'second_choice': '',
+                    'third_choice': '',
+                    'processing_ms': '',
+                    'low_confidence': '',
+                    'error': str(exc),
+                })
+
+        fieldnames = [
+            'filename',
+            'predicted_genre',
+            'confidence',
+            'second_choice',
+            'third_choice',
+            'processing_ms',
+            'low_confidence',
+            'error',
+        ]
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+
+        self.root.after(0, self._on_batch_inference_complete, csv_path, len(audio_files), len(rows))
+
+
+    def _on_batch_inference_complete(self, csv_path, files_count, rows_count):
+        """Finalize batch-mode UI updates."""
+        self.processing_active = False
+        self.progress_bar.stop()
+        self.batch_button.config(state=tk.NORMAL)
+        self.status_label.config(
+            text=f"Batch complete: {files_count} files processed",
+            foreground="#4CAF50",
+        )
+        self.metrics_label.config(text=f"Saved CSV: {Path(csv_path).name} ({rows_count} rows)")
 
 
     def _start_telemetry_loop(self):
@@ -549,7 +689,35 @@ class GenrePredictor:
         self.use_nn = False
         self.input_mode = 'engineered_3ch'
         self.use_chunk_voting = True
+        self.confidence_threshold = CONFIDENCE_THRESHOLD
         self._load_trained_models()
+
+
+    def _build_prediction_details(self, probs):
+        """Convert a probability vector into top-k prediction details."""
+        probs = np.asarray(probs, dtype=np.float32)
+        denom = float(np.sum(probs))
+        if denom <= 0.0:
+            raise RuntimeError("Invalid probabilities from model.")
+        probs = probs / denom
+
+        top_idx = np.argsort(probs)[::-1][:3]
+        top3 = []
+        for idx in top_idx:
+            confidence = int(round(float(probs[idx]) * 100.0))
+            top3.append({'genre': self.labels[int(idx)], 'confidence': max(1, min(confidence, 99))})
+
+        top_genre = top3[0]['genre']
+        top_confidence = top3[0]['confidence']
+        is_low_confidence = top_confidence < self.confidence_threshold
+
+        return {
+            'genre': top_genre,
+            'confidence': top_confidence,
+            'top3': top3,
+            'is_low_confidence': is_low_confidence,
+            'threshold': self.confidence_threshold,
+        }
 
 
     def _configure_inference_profile(self):
@@ -572,6 +740,7 @@ class GenrePredictor:
         if tf is None:
             print("TensorFlow not available; using deterministic fallback predictor.")
             return
+        tfm = tf
 
         project_root = Path(__file__).resolve().parent
         candidate_dirs = [
@@ -605,17 +774,17 @@ class GenrePredictor:
         ]
 
         # Define ApplicationPreprocess for export-safe model deserialization
-        @keras.utils.register_keras_serializable(package='AudioTexture')
-        class ApplicationPreprocess(tf.keras.layers.Layer):
+        @tfm.keras.utils.register_keras_serializable(package='AudioTexture')
+        class ApplicationPreprocess(tfm.keras.layers.Layer):
             def __init__(self, mode, **kwargs):
                 super().__init__(**kwargs)
                 self.mode = mode
 
             def call(self, inputs):
                 if self.mode == 'resnet50':
-                    return tf.keras.applications.resnet.preprocess_input(inputs)
+                    return tfm.keras.applications.resnet.preprocess_input(inputs)
                 if self.mode == 'efficientnetv2b0':
-                    return tf.keras.applications.efficientnet_v2.preprocess_input(inputs)
+                    return tfm.keras.applications.efficientnet_v2.preprocess_input(inputs)
                 raise ValueError(f'Unknown preprocess mode: {self.mode}')
 
             def get_config(self):
@@ -624,7 +793,7 @@ class GenrePredictor:
                 return config
 
         custom_objects = {
-            'preprocess_input': tf.keras.applications.resnet.preprocess_input,
+            'preprocess_input': tfm.keras.applications.resnet.preprocess_input,
             'ApplicationPreprocess': ApplicationPreprocess,
         }
 
@@ -633,7 +802,7 @@ class GenrePredictor:
             if not ckpt_path.exists():
                 continue
             try:
-                self.model = tf.keras.models.load_model(
+                self.model = tfm.keras.models.load_model(
                     str(ckpt_path),
                     compile=False,
                     safe_mode=False,
@@ -696,13 +865,21 @@ class GenrePredictor:
         else:
             x = self._prepare_engineered_tensor(mel_image)
         probs = self.model(x, training=False).numpy()[0].astype(np.float32)
-        denom = float(np.sum(probs))
-        if denom <= 0.0:
-            raise RuntimeError("Model returned invalid probabilities.")
-        probs = probs / denom
-        idx = int(np.argmax(probs))
-        confidence = int(round(float(probs[idx]) * 100.0))
-        return self.labels[idx], max(1, min(confidence, 99))
+        details = self._build_prediction_details(probs)
+        return details['genre'], details['confidence']
+
+
+    def _predict_with_models_details(self, mel_image):
+        """Run neural inference and return full top-k details."""
+        if self.model is None:
+            raise RuntimeError("No neural model is loaded.")
+
+        if self.input_mode == 'raw_rgb':
+            x = self._prepare_raw_rgb_tensor(mel_image)
+        else:
+            x = self._prepare_engineered_tensor(mel_image)
+        probs = self.model(x, training=False).numpy()[0].astype(np.float32)
+        return self._build_prediction_details(probs)
 
 
     def _load_audio_for_chunks(self, file_path):
@@ -769,9 +946,54 @@ class GenrePredictor:
             raise RuntimeError("Chunk voting produced invalid probabilities.")
 
         probs = probs / denom
-        idx = int(np.argmax(probs))
-        confidence = int(round(float(probs[idx]) * 100.0))
-        return self.labels[idx], max(1, min(confidence, 99))
+        details = self._build_prediction_details(probs)
+        return details['genre'], details['confidence']
+
+
+    def _predict_from_audio_chunks_details(self, file_path):
+        """Chunk-voting inference that returns top-k details."""
+        if self.model is None:
+            raise RuntimeError("No neural model is loaded.")
+        model = self.model
+
+        audio = self._load_audio_for_chunks(file_path)
+        chunk_len = int(SAMPLE_RATE * CHUNK_DURATION)
+        num_chunks = int(DURATION / CHUNK_DURATION)
+
+        probs_acc = np.zeros((len(self.labels),), dtype=np.float32)
+        used = 0
+
+        for i in range(num_chunks):
+            start = i * chunk_len
+            end = start + chunk_len
+            chunk_audio = audio[start:end]
+            if len(chunk_audio) < chunk_len:
+                chunk_audio = np.pad(chunk_audio, (0, chunk_len - len(chunk_audio)), mode='constant')
+
+            mel_spec = librosa.feature.melspectrogram(
+                y=chunk_audio,
+                sr=SAMPLE_RATE,
+                n_fft=N_FFT,
+                hop_length=HOP_LENGTH,
+                n_mels=N_MELS,
+                fmax=8000,
+            )
+            mel_db = librosa.power_to_db(mel_spec, ref=np.max)
+
+            chunk_image = mel_db_to_model_image(mel_db)
+            if self.input_mode == 'raw_rgb':
+                x = self._prepare_raw_rgb_tensor(chunk_image)
+            else:
+                x = self._prepare_engineered_tensor(chunk_image)
+            pred = model(x, training=False).numpy()[0].astype(np.float32)
+            probs_acc += pred
+            used += 1
+
+        if used == 0:
+            raise RuntimeError("No chunks available for prediction.")
+
+        probs = probs_acc / float(used)
+        return self._build_prediction_details(probs)
 
 
     def _predict_stub(self, mel_db):
@@ -803,9 +1025,38 @@ class GenrePredictor:
         probs = np.exp(logits)
         probs = probs / np.sum(probs)
 
-        idx = int(np.argmax(probs))
-        confidence = int(round(float(probs[idx]) * 100.0))
-        return self.labels[idx], max(1, min(confidence, 99))
+        details = self._build_prediction_details(probs)
+        return details['genre'], details['confidence']
+
+
+    def _predict_stub_details(self, mel_db):
+        """Return top-k details for deterministic fallback predictor."""
+        # Feature vector derived from spectral texture
+        mean_energy = float(np.mean(mel_db))
+        spread = float(np.std(mel_db))
+        high_band = float(np.mean(mel_db[-16:, :]))
+        low_band = float(np.mean(mel_db[:16, :]))
+        rhythm_proxy = float(np.std(np.diff(mel_db, axis=1)))
+
+        features = np.array([mean_energy, spread, high_band, low_band, rhythm_proxy], dtype=np.float32)
+
+        W = np.array([
+            [0.4, -0.2, 0.3, -0.1, 0.2],
+            [0.2, 0.3, -0.1, 0.4, -0.2],
+            [-0.1, 0.5, -0.3, 0.2, 0.1],
+            [0.3, -0.4, 0.2, 0.1, 0.2],
+            [-0.3, 0.2, 0.4, -0.2, 0.3],
+            [0.1, -0.1, 0.2, 0.4, 0.3],
+            [0.2, 0.1, -0.2, 0.3, -0.1],
+            [0.3, 0.2, 0.1, -0.3, 0.2],
+        ], dtype=np.float32)
+        b = np.array([0.3, 0.1, 0.0, 0.2, -0.1, 0.0, 0.15, 0.05], dtype=np.float32)
+
+        logits = W @ features + b
+        logits = logits - np.max(logits)
+        probs = np.exp(logits)
+        probs = probs / np.sum(probs)
+        return self._build_prediction_details(probs)
 
     def predict_from_mel(self, mel_db, mel_image=None):
         """
@@ -820,6 +1071,35 @@ class GenrePredictor:
                 print(f"Neural inference failed, falling back to stub predictor: {exc}")
 
         return self._predict_stub(mel_db)
+
+
+    def predict_details_from_audio(self, file_path, mel_db=None, mel_image=None):
+        """Return full prediction details including top-3 and low-confidence state."""
+        if self.use_nn:
+            if self.use_chunk_voting:
+                try:
+                    return self._predict_from_audio_chunks_details(file_path)
+                except Exception as exc:
+                    print(f"Chunk voting failed; attempting single-image fallback: {exc}")
+                    if mel_db is not None:
+                        try:
+                            model_image = mel_db_to_model_image(mel_db)
+                            return self._predict_with_models_details(model_image)
+                        except Exception as exc2:
+                            print(f"Single-image neural inference failed: {exc2}")
+            else:
+                if mel_db is not None:
+                    try:
+                        model_image = mel_db_to_model_image(mel_db)
+                        return self._predict_with_models_details(model_image)
+                    except Exception as exc:
+                        print(f"Single-image neural inference failed; falling back to stub: {exc}")
+
+        if mel_db is not None:
+            return self._predict_stub_details(mel_db)
+
+        _, mel_db_local = audio_to_mel_image(file_path)
+        return self._predict_stub_details(mel_db_local)
 
 
     def predict_from_audio(self, file_path, mel_db=None, mel_image=None):
