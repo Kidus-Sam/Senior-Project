@@ -1,0 +1,9 @@
+genre,recall,f1
+Electronic,0.7830,
+Experimental,0.4211,
+Folk,0.7355,
+Hip-Hop,0.8114,
+Instrumental,0.5000,
+International,0.8438,
+Pop,0.5652,
+Rock,0.6250,

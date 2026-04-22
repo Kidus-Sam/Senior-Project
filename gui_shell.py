@@ -13,6 +13,7 @@ import shutil
 import warnings
 import time
 import csv
+from datetime import datetime
 from pathlib import Path
 from io import BytesIO
 
@@ -42,6 +43,33 @@ DURATION = 30.0
 CHUNK_DURATION = 5.0
 CONFIDENCE_THRESHOLD = 50
 
+UI_THEMES = {
+    'Classic': {
+        'bg': '#f0f0f0',
+        'surface': '#ffffff',
+        'canvas': '#f5f5f5',
+        'accent': '#2196F3',
+        'text': '#333333',
+        'muted': '#666666',
+        'success': '#4CAF50',
+        'warning': '#FF9800',
+        'error': '#F44336',
+        'placeholder': '#CCCCCC',
+    },
+    'Modern': {
+        'bg': '#eef5ff',
+        'surface': '#ffffff',
+        'canvas': '#edf2fb',
+        'accent': '#0A66C2',
+        'text': '#102A43',
+        'muted': '#486581',
+        'success': '#0F9D58',
+        'warning': '#E67700',
+        'error': '#C92A2A',
+        'placeholder': '#9FB3C8',
+    },
+}
+
 # Try to import TkinterDnD2
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -60,8 +88,11 @@ class AudioTextureGUI:
         """Initialize the AudioTexture GUI."""
         self.root = root
         self.root.title("AudioTexture - Music Genre Classification")
-        self.root.geometry("1000x800")
+        self.root.geometry("1080x860")
         self.root.resizable(True, True)
+        self.project_root = Path(__file__).resolve().parent
+        self.ui_mode_var = tk.StringVar(value='Classic')
+        self.current_palette = UI_THEMES['Classic']
         
         # Current state
         self.current_file = None
@@ -82,62 +113,227 @@ class AudioTextureGUI:
         
         # Build the layout
         self.build_ui()
+        self._apply_theme_to_widgets()
         
     
     def setup_styles(self):
-        """Configure ttk styles for modern appearance."""
+        """Configure ttk styles based on active UI mode."""
         style = ttk.Style()
         style.theme_use('clam')
-        
-        # Configure colors
-        bg_color = "#f0f0f0"
-        accent_color = "#2196F3"
-        text_color = "#333333"
-        
-        style.configure('TFrame', background=bg_color)
-        style.configure('TLabel', background=bg_color, foreground=text_color)
-        style.configure('Header.TLabel', font=('Segoe UI', 16, 'bold'), 
-                       background=bg_color, foreground=accent_color)
-        style.configure('Subheader.TLabel', font=('Segoe UI', 12, 'bold'),
-                       background=bg_color, foreground=text_color)
-        style.configure('Info.TLabel', font=('Segoe UI', 10),
-                       background=bg_color, foreground=text_color)
-        
-        self.root.configure(bg=bg_color)
+
+        self.current_palette = UI_THEMES.get(self.ui_mode_var.get(), UI_THEMES['Classic'])
+        p = self.current_palette
+
+        style.configure('TFrame', background=p['bg'])
+        style.configure('TLabel', background=p['bg'], foreground=p['text'])
+        style.configure('Header.TLabel', font=('Segoe UI', 16, 'bold'), background=p['bg'], foreground=p['accent'])
+        style.configure('Subheader.TLabel', font=('Segoe UI', 12, 'bold'), background=p['bg'], foreground=p['text'])
+        style.configure('Info.TLabel', font=('Segoe UI', 10), background=p['bg'], foreground=p['text'])
+        style.configure('TLabelframe', background=p['bg'], borderwidth=1)
+        style.configure('TLabelframe.Label', background=p['bg'], foreground=p['text'])
+
+        if self.ui_mode_var.get() == 'Modern':
+            style.configure('Header.TLabel', font=('Segoe UI', 18, 'bold'))
+            style.configure('Subheader.TLabel', font=('Segoe UI', 13, 'bold'))
+            style.configure('Info.TLabel', font=('Segoe UI', 10))
+            style.configure('TLabelframe', borderwidth=0)
+        else:
+            style.configure('Header.TLabel', font=('Segoe UI', 16, 'bold'))
+            style.configure('Subheader.TLabel', font=('Segoe UI', 12, 'bold'))
+            style.configure('TLabelframe', borderwidth=1)
+
+        self.root.configure(bg=p['bg'])
+
+
+    def on_ui_mode_change(self, *_args):
+        """Switch between classic and modern UI palettes."""
+        self.setup_styles()
+        self._layout_by_mode()
+        self._apply_theme_to_widgets()
+        self._ensure_layout_visibility()
+
+
+    def _apply_theme_to_widgets(self):
+        """Apply current palette colors to non-ttk widgets and labels."""
+        p = self.current_palette
+
+        if hasattr(self, 'content_canvas'):
+            self.content_canvas.configure(bg=p['bg'])
+
+        if hasattr(self, 'drop_canvas'):
+            self.drop_canvas.configure(bg=p['surface'], highlightbackground=p['placeholder'])
+            if not self.current_file:
+                self.drop_canvas.itemconfig(self.drop_text, fill=p['muted'])
+            self._draw_drop_zone_chrome()
+
+        if hasattr(self, 'file_info_content'):
+            self.file_info_content.configure(bg=p['surface'], fg=p['text'])
+
+        if hasattr(self, 'spec_canvas'):
+            self.spec_canvas.configure(bg=p['canvas'], highlightbackground=p['placeholder'])
+            self._draw_spec_canvas_chrome()
+
+        if hasattr(self, 'placeholder_text_id') and self.placeholder_text_id is not None:
+            self.spec_canvas.itemconfig(self.placeholder_text_id, fill=p['placeholder'])
+
+        if hasattr(self, 'genre_label'):
+            self.genre_label.configure(foreground=p['accent'])
+
+        if hasattr(self, 'confidence_label'):
+            self.confidence_label.configure(foreground=p['success'])
+
+        if hasattr(self, 'status_label'):
+            self.status_label.configure(foreground=p['muted'])
     
     
     def build_ui(self):
         """Build the main UI layout."""
         # Main container
-        main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
         # Header
-        header_label = ttk.Label(main_frame, text="AudioTexture", 
+        header_label = ttk.Label(self.main_frame, text="AudioTexture", 
                                  style='Header.TLabel')
         header_label.pack(pady=(0, 10))
         
-        subtitle_label = ttk.Label(main_frame, 
+        subtitle_label = ttk.Label(self.main_frame, 
                                    text="AI-Powered Music Genre Classification",
                                    style='Info.TLabel')
         subtitle_label.pack(pady=(0, 30))
-        
-        # Main content area - split into two columns
-        content_frame = ttk.Frame(main_frame)
-        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        controls_frame = ttk.Frame(self.main_frame)
+        controls_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(controls_frame, text="UI Mode:", style='Info.TLabel').pack(side=tk.LEFT, padx=(0, 8))
+        self.ui_mode_combo = ttk.Combobox(
+            controls_frame,
+            values=list(UI_THEMES.keys()),
+            textvariable=self.ui_mode_var,
+            state='readonly',
+            width=10,
+        )
+        self.ui_mode_combo.pack(side=tk.LEFT, padx=(0, 12))
+        self.ui_mode_combo.bind('<<ComboboxSelected>>', self.on_ui_mode_change)
+
+        self.performance_button = ttk.Button(
+            controls_frame,
+            text="Performance Snapshot",
+            command=self.show_performance_snapshot,
+        )
+        self.performance_button.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.self_check_button = ttk.Button(
+            controls_frame,
+            text="Run Demo Self-Check",
+            command=self.run_demo_self_check,
+        )
+        self.self_check_button.pack(side=tk.LEFT)
+
+        # Scrollable content area so Modern mode can stack safely on smaller windows.
+        self.scroll_area = ttk.Frame(self.main_frame)
+        self.scroll_area.pack(fill=tk.BOTH, expand=True)
+
+        self.content_canvas = tk.Canvas(
+            self.scroll_area,
+            highlightthickness=0,
+            bg=self.current_palette['bg'],
+        )
+        self.content_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.content_scrollbar = ttk.Scrollbar(
+            self.scroll_area,
+            orient=tk.VERTICAL,
+            command=self.content_canvas.yview,
+        )
+        self.content_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.content_canvas.configure(yscrollcommand=self.content_scrollbar.set)
+
+        self.content_frame = ttk.Frame(self.content_canvas)
+        self.content_window_id = self.content_canvas.create_window((0, 0), window=self.content_frame, anchor='nw')
+
+        self.content_frame.bind('<Configure>', self._sync_content_scrollregion)
+        self.content_canvas.bind('<Configure>', self._sync_content_canvas_width)
+        self.content_canvas.bind_all('<MouseWheel>', self._on_mousewheel)
+        self.content_canvas.bind_all('<Button-4>', self._on_mousewheel)
+        self.content_canvas.bind_all('<Button-5>', self._on_mousewheel)
         
         # Left side - Drop zone and file info
-        left_frame = ttk.Frame(content_frame)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        self.left_frame = ttk.Frame(self.content_frame)
+        self.left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         
-        self.build_drop_zone(left_frame)
-        self.build_file_info_panel(left_frame)
+        self.build_drop_zone(self.left_frame)
+        self.build_file_info_panel(self.left_frame)
         
         # Right side - Results and spectrogram
-        right_frame = ttk.Frame(content_frame)
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        self.right_frame = ttk.Frame(self.content_frame)
+        self.right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
         
-        self.build_results_panel(right_frame)
+        self.build_results_panel(self.right_frame)
+        self._layout_by_mode()
+        self._ensure_layout_visibility()
+
+
+    def _sync_content_scrollregion(self, _event=None):
+        """Keep the scrollable region aligned with the embedded content frame."""
+        if hasattr(self, 'content_canvas'):
+            self.content_canvas.configure(scrollregion=self.content_canvas.bbox('all'))
+
+
+    def _sync_content_canvas_width(self, event):
+        """Match the embedded content frame width to the canvas width."""
+        if hasattr(self, 'content_window_id'):
+            self.content_canvas.itemconfigure(self.content_window_id, width=event.width)
+
+
+    def _on_mousewheel(self, event):
+        """Scroll the content canvas with the mouse wheel."""
+        if not hasattr(self, 'content_canvas'):
+            return
+
+        if getattr(event, 'num', None) == 4:
+            delta = -1
+        elif getattr(event, 'num', None) == 5:
+            delta = 1
+        else:
+            delta = int(-1 * (event.delta / 120)) if getattr(event, 'delta', 0) else 0
+
+        if delta:
+            self.content_canvas.yview_scroll(delta, 'units')
+
+
+    def _layout_by_mode(self):
+        """Reflow primary panes by selected mode to make layouts distinct."""
+        if not hasattr(self, 'left_frame') or not hasattr(self, 'right_frame'):
+            return
+
+        self.left_frame.pack_forget()
+        self.right_frame.pack_forget()
+
+        if self.ui_mode_var.get() == 'Modern':
+            # Modern mode: stacked sections, input tools first for immediate visibility.
+            self.left_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 14))
+            self.right_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.left_frame.configure(height=430)
+            self.right_frame.configure(height=360)
+            self.right_frame.pack_propagate(False)
+            self.left_frame.pack_propagate(False)
+        else:
+            # Classic mode: two-column split.
+            self.left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+            self.right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+            self.right_frame.pack_propagate(True)
+            self.left_frame.pack_propagate(True)
+
+
+    def _ensure_layout_visibility(self):
+        """Make sure the active mode opens with enough room to show its main controls."""
+        if self.ui_mode_var.get() == 'Modern':
+            self.root.minsize(1040, 860)
+            self.root.geometry('1040x860')
+        else:
+            self.root.minsize(1000, 800)
     
     
     def build_drop_zone(self, parent):
@@ -149,10 +345,8 @@ class AudioTextureGUI:
         self.drop_canvas = tk.Canvas(drop_frame, bg="white", highlightthickness=2,
                                      highlightbackground="#CCCCCC", height=200)
         self.drop_canvas.pack(fill=tk.BOTH, expand=True)
-        
-        # Dashed border rectangle
-        self.drop_canvas.create_rectangle(5, 5, 395, 195, outline="#2196F3",
-                                          width=2, dash=(5, 5))
+
+        self.drop_canvas.bind('<Configure>', lambda _e: self._draw_drop_zone_chrome())
         
         # Instructions text
         self.drop_text = self.drop_canvas.create_text(
@@ -178,19 +372,77 @@ class AudioTextureGUI:
 
         # Fallback click-to-browse support if drag-and-drop is unavailable
         self.drop_canvas.bind('<Button-1>', self.on_browse_click)
+
+
+    def _create_rounded_rect(self, canvas, x1, y1, x2, y2, radius=16, **kwargs):
+        """Draw a rounded rectangle on a Tk canvas using a smoothed polygon."""
+        points = [
+            x1 + radius, y1,
+            x2 - radius, y1,
+            x2, y1,
+            x2, y1 + radius,
+            x2, y2 - radius,
+            x2, y2,
+            x2 - radius, y2,
+            x1 + radius, y2,
+            x1, y2,
+            x1, y2 - radius,
+            x1, y1 + radius,
+            x1, y1,
+        ]
+        return canvas.create_polygon(points, smooth=True, splinesteps=36, **kwargs)
+
+
+    def _draw_drop_zone_chrome(self):
+        """Draw mode-specific border treatment for the drop canvas."""
+        if not hasattr(self, 'drop_canvas'):
+            return
+
+        canvas = self.drop_canvas
+        canvas.delete('drop_chrome')
+        w = max(canvas.winfo_width(), 40)
+        h = max(canvas.winfo_height(), 40)
+        p = self.current_palette
+
+        if self.ui_mode_var.get() == 'Modern':
+            self._create_rounded_rect(
+                canvas,
+                6,
+                6,
+                w - 6,
+                h - 6,
+                radius=22,
+                outline=p['accent'],
+                width=2,
+                fill=p['surface'],
+                tags='drop_chrome',
+            )
+        else:
+            canvas.create_rectangle(
+                5,
+                5,
+                w - 5,
+                h - 5,
+                outline=p['accent'],
+                width=2,
+                dash=(5, 5),
+                tags='drop_chrome',
+            )
+
+        canvas.tag_lower('drop_chrome')
     
     
     def on_drag_enter(self, event):
         """Handle drag enter event."""
-        self.drop_canvas.configure(highlightbackground="#2196F3")
-        self.drop_canvas.itemconfig(self.drop_text, fill="#2196F3")
+        self.drop_canvas.configure(highlightbackground=self.current_palette['accent'])
+        self.drop_canvas.itemconfig(self.drop_text, fill=self.current_palette['accent'])
     
     
     def on_drag_leave(self, event):
         """Handle drag leave event."""
-        self.drop_canvas.configure(highlightbackground="#CCCCCC")
+        self.drop_canvas.configure(highlightbackground=self.current_palette['placeholder'])
         if not self.current_file:
-            self.drop_canvas.itemconfig(self.drop_text, fill="#999999")
+            self.drop_canvas.itemconfig(self.drop_text, fill=self.current_palette['muted'])
     
     
     def on_file_drop(self, event):
@@ -338,6 +590,7 @@ class AudioTextureGUI:
                                      highlightbackground="#CCCCCC",
                                      height=150)
         self.spec_canvas.pack(fill=tk.BOTH, expand=True)
+        self.spec_canvas.bind('<Configure>', lambda _e: self._draw_spec_canvas_chrome())
 
         # Telemetry overlay drawn on top of the spectrogram canvas.
         self.telemetry_overlay_bg = self.spec_canvas.create_rectangle(
@@ -372,6 +625,44 @@ class AudioTextureGUI:
             fill="#CCCCCC",
             font=('Segoe UI', 12)
         )
+
+
+    def _draw_spec_canvas_chrome(self):
+        """Draw mode-specific chrome for the spectrogram canvas."""
+        if not hasattr(self, 'spec_canvas'):
+            return
+
+        canvas = self.spec_canvas
+        canvas.delete('spec_chrome')
+        w = max(canvas.winfo_width(), 40)
+        h = max(canvas.winfo_height(), 40)
+        p = self.current_palette
+
+        if self.ui_mode_var.get() == 'Modern':
+            self._create_rounded_rect(
+                canvas,
+                4,
+                4,
+                w - 4,
+                h - 4,
+                radius=16,
+                outline=p['placeholder'],
+                width=1,
+                fill=p['canvas'],
+                tags='spec_chrome',
+            )
+        else:
+            canvas.create_rectangle(
+                4,
+                4,
+                w - 4,
+                h - 4,
+                outline=p['placeholder'],
+                width=1,
+                tags='spec_chrome',
+            )
+
+        canvas.tag_lower('spec_chrome')
     
     
     def start_processing(self, file_path):
@@ -446,11 +737,11 @@ class AudioTextureGUI:
         top3 = prediction_details.get('top3', [])
 
         if is_low_confidence:
-            self.genre_label.config(text=f"Low confidence ({genre})", foreground="#FF9800")
-            self.status_label.config(text="Prediction is below confidence threshold", foreground="#FF9800")
+            self.genre_label.config(text=f"Low confidence ({genre})", foreground=self.current_palette['warning'])
+            self.status_label.config(text="Prediction is below confidence threshold", foreground=self.current_palette['warning'])
         else:
-            self.genre_label.config(text=genre, foreground="#2196F3")
-            self.status_label.config(text="Mel-spectrogram generated and displayed", foreground="#4CAF50")
+            self.genre_label.config(text=genre, foreground=self.current_palette['accent'])
+            self.status_label.config(text="Mel-spectrogram generated and displayed", foreground=self.current_palette['success'])
 
         self.confidence_label.config(text=f"{confidence}%")
         if top3:
@@ -463,6 +754,120 @@ class AudioTextureGUI:
         self._hide_canvas_telemetry()
         self.save_button.config(state=tk.NORMAL)
         self.batch_button.config(state=tk.NORMAL)
+
+
+    def _load_performance_snapshot_rows(self):
+        """Load per-genre performance snapshot from CSV or fallback values."""
+        snapshot_path = self.project_root / 'model_performance_snapshot.csv'
+        rows = []
+
+        if snapshot_path.exists():
+            with open(snapshot_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    rows.append({
+                        'genre': row.get('genre', ''),
+                        'recall': row.get('recall', ''),
+                        'f1': row.get('f1', ''),
+                    })
+            return rows
+
+        # Fallback snapshot from latest chunk model diagnostics.
+        fallback = [
+            ('Electronic', '0.7830', ''),
+            ('Experimental', '0.4211', ''),
+            ('Folk', '0.7355', ''),
+            ('Hip-Hop', '0.8114', ''),
+            ('Instrumental', '0.5000', ''),
+            ('International', '0.8438', ''),
+            ('Pop', '0.5652', ''),
+            ('Rock', '0.6250', ''),
+        ]
+        for genre, recall, f1 in fallback:
+            rows.append({'genre': genre, 'recall': recall, 'f1': f1})
+        return rows
+
+
+    def show_performance_snapshot(self):
+        """Open a small report-friendly window with per-genre performance."""
+        rows = self._load_performance_snapshot_rows()
+        win = tk.Toplevel(self.root)
+        win.title('Per-Genre Performance Snapshot')
+        win.geometry('520x360')
+
+        ttk.Label(
+            win,
+            text='Model Performance by Genre',
+            style='Subheader.TLabel'
+        ).pack(pady=(12, 8))
+
+        tree = ttk.Treeview(win, columns=('genre', 'recall', 'f1'), show='headings', height=10)
+        tree.heading('genre', text='Genre')
+        tree.heading('recall', text='Recall')
+        tree.heading('f1', text='F1 (optional)')
+        tree.column('genre', width=180)
+        tree.column('recall', width=120, anchor=tk.CENTER)
+        tree.column('f1', width=120, anchor=tk.CENTER)
+
+        for row in rows:
+            tree.insert('', tk.END, values=(row['genre'], row['recall'], row['f1']))
+
+        tree.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
+
+        note = ttk.Label(
+            win,
+            text='Source: model_performance_snapshot.csv (fallback values shown when file is missing).',
+            style='Info.TLabel'
+        )
+        note.pack(pady=(0, 10))
+
+
+    def run_demo_self_check(self):
+        """Run a lightweight reliability pass and save a timestamped report."""
+        checks = []
+
+        checks.append(('TensorFlow available', tf is not None))
+        checks.append(('Loaded model available', self.predictor.use_nn and self.predictor.model is not None))
+        checks.append(('Chunk voting enabled profile', bool(self.predictor.use_chunk_voting)))
+        checks.append(('Batch export button active', hasattr(self, 'batch_button')))
+        checks.append(('UI mode selector available', hasattr(self, 'ui_mode_combo')))
+
+        checkpoint_path = self.project_root / 'model_checkpoints' / 'final_chunk_retrained_resnet50.keras'
+        checks.append(('Final chunk checkpoint exists', checkpoint_path.exists()))
+
+        train_manifest = self.project_root / 'processed_data' / 'spectrograms_chunked' / 'train_manifest.csv'
+        val_manifest = self.project_root / 'processed_data' / 'spectrograms_chunked' / 'val_manifest.csv'
+        checks.append(('Chunk train manifest exists', train_manifest.exists()))
+        checks.append(('Chunk val manifest exists', val_manifest.exists()))
+
+        snapshot_path = self.project_root / 'model_performance_snapshot.csv'
+        checks.append(('Per-genre snapshot CSV exists', snapshot_path.exists()))
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_path = self.project_root / f'demo_self_check_{timestamp}.txt'
+
+        passed = sum(1 for _, ok in checks if ok)
+        total = len(checks)
+
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write('AudioTexture Demo Self-Check Report\n')
+            f.write(f'Timestamp: {datetime.now().isoformat()}\n\n')
+            for name, ok in checks:
+                f.write(f"[{'PASS' if ok else 'FAIL'}] {name}\n")
+            f.write(f"\nSummary: {passed}/{total} checks passed\n")
+            f.write('\nRecommended demo flow:\n')
+            f.write('1. Single-file inference\n')
+            f.write('2. Top-3 + low-confidence display\n')
+            f.write('3. Batch folder export to CSV\n')
+            f.write('4. UI mode switch Classic <-> Modern\n')
+            f.write('5. Performance Snapshot window\n')
+
+        color = self.current_palette['success'] if passed == total else self.current_palette['warning']
+        self.status_label.config(
+            text=f'Demo self-check complete: {passed}/{total} passed',
+            foreground=color,
+        )
+        self.metrics_label.config(text=f'Report saved: {report_path.name}')
 
 
     def render_spectrogram_on_canvas(self, image):
@@ -1057,21 +1462,6 @@ class GenrePredictor:
         probs = np.exp(logits)
         probs = probs / np.sum(probs)
         return self._build_prediction_details(probs)
-
-    def predict_from_mel(self, mel_db, mel_image=None):
-        """
-        Return (genre, confidence_percent) using trained model(s) when available.
-        """
-        if self.use_nn:
-            try:
-                # Always infer from training-style rendering to avoid UI-style drift.
-                model_image = mel_db_to_model_image(mel_db)
-                return self._predict_with_models(model_image)
-            except Exception as exc:
-                print(f"Neural inference failed, falling back to stub predictor: {exc}")
-
-        return self._predict_stub(mel_db)
-
 
     def predict_details_from_audio(self, file_path, mel_db=None, mel_image=None):
         """Return full prediction details including top-3 and low-confidence state."""
