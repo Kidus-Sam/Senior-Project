@@ -832,7 +832,7 @@ class AudioTextureGUI:
         checks.append(('Batch export button active', hasattr(self, 'batch_button')))
         checks.append(('UI mode selector available', hasattr(self, 'ui_mode_combo')))
 
-        checkpoint_path = self.project_root / 'model_checkpoints' / 'final_chunk_retrained_resnet50.keras'
+        checkpoint_path = self.project_root /'Model data'/ 'model_checkpoints' / 'final_chunk_retrained_resnet50.keras'
         checks.append(('Final chunk checkpoint exists', checkpoint_path.exists()))
 
         train_manifest = self.project_root / 'processed_data' / 'spectrograms_chunked' / 'train_manifest.csv'
