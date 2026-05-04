@@ -12,6 +12,42 @@ Music discovery and royalty pipelines rely heavily on metadata, but manual genre
 
 In short: this project exists to make genre tagging more reliable for independent creators and music workflows.
 
+## Getting Started 😼
+Follow the following steps to get you up and starting the app itself. If you are interested in retraining the model, you can skip this section and look through the rest of the readme.
+
+### 1) Prerequisites
+Ensure you have Python 3.8+ installed. You will also need `pip` to install the required dependencies.
+
+### 2) Clone the repository
+Open your terminal or command prompt and run:
+
+```
+git clone https://github.com/Kidus-Sam/Senior-Project.git
+cd Senior-Project
+```
+
+### 3) Install dependencies
+Install the necessary libraries for the audio processing, the GUI, and the machine learning model:
+
+```
+pip install -r requirements.txt
+```
+### 4) Running the App
+To launch the desktop interface, run the following command:
+```
+python gui_shell.py
+```
+
+### 5) How to use AudioTexture
+1) Select Audio: Use the "Choose File" button or simply drag and drop an MP3 or WAV file into the application window.
+2) Wait for Inference: The app will split the audio into 5-second chunks, generate spectrograms, and run them through the model.
+3) View Results:
+      - Predicted Genre: The most likely genre for the track.
+      - Confidence Score: How certain the model is about the result.
+      - Top-3 Alternatives: Other possible genres the model identified.
+4) Visualizer: See the Mel-spectrogram representation of your audio.
+
+# Advanced Usage: Project Replication
 ## What The Project Does
 
 - Accepts audio input through a Tkinter desktop GUI (drag-and-drop + file picker fallback).
@@ -145,7 +181,7 @@ python ".\chunked_spectrogram_generator.py" --augment
 ### 3. Build Train/Validation Split Manifest (Chunk Dataset)
 
 ```powershell
-pyhton ".\build_track_level_split.py"
+python ".\build_track_level_split.py"
 ```
 
 This prevents leakage by splitting at the track level before training.
