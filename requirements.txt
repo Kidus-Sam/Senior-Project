@@ -1,0 +1,8 @@
+librosa
+tensorflow
+numpy
+pandas
+matplotlib
+tkinterdnd2
+pillow
+tqdm
